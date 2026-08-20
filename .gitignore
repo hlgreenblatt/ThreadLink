@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+# Demo TLS material is generated on demand by threadlink.certs.ensure_cert —
+# never commit keys, even self-signed throwaways.
+certs/
