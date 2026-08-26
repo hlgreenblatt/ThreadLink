@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import ssl
 from typing import Any, Awaitable, Callable, Optional
 
@@ -293,6 +294,20 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
             fut.set_exception(exc)
 
 
+def _keylog_file():
+    """If SSLKEYLOGFILE is set, return an append-mode handle so aioquic writes
+    TLS 1.3 traffic secrets in the NSS key-log format Wireshark reads natively.
+    Standard convention (curl, browsers). Unset in production; the capture story
+    is opt-in and leaves no trace when the env var is absent."""
+    path = os.environ.get("SSLKEYLOGFILE")
+    if not path:
+        return None
+    try:
+        return open(path, "a")
+    except OSError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -311,6 +326,7 @@ def client_config(*, verify: bool = False, cafile: Optional[str] = None,
         alpn_protocols=[ALPN],
         idle_timeout=30.0,
         session_ticket=session_ticket,       # set to enable 0-RTT resumption
+        secrets_log_file=_keylog_file(),     # SSLKEYLOGFILE -> Wireshark decrypt
     )
     if verify:
         if cafile:
@@ -326,6 +342,7 @@ def server_config(certfile: str, keyfile: str) -> QuicConfiguration:
         is_client=False,
         alpn_protocols=[ALPN],
         idle_timeout=30.0,
+        secrets_log_file=_keylog_file(),     # SSLKEYLOGFILE -> Wireshark decrypt
     )
     cfg.load_cert_chain(certfile, keyfile)
     return cfg
