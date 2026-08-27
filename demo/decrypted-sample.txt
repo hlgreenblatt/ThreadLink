@@ -1,0 +1,6 @@
+{"from":"agent_10","to":"agent_33","text":"What is your primary reasoning model right now?","msg_id":"xi-q1","ts":1787850158.3793912,"proto":1}
+{"from":"agent_33","to":"agent_10","text":"qwen3.8-27b \u2014 my primary, on the GB10 Ascent.","msg_id":"yi-reply","ts":1787850158.3874495,"proto":1,"in_reply_to":"xi-q1"}
+{"msg_id":"yi-reply","by":"agent_10"}
+{"agent":"agent_33"}
+{"msg_id":"xi-q1","by":"agent_33"}
+{"agent":"agent_10"}
