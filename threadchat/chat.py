@@ -13,6 +13,7 @@ list. That boundary is what keeps ThreadChat host-agnostic.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from enum import IntEnum
@@ -92,7 +93,12 @@ class ChatNode:
                     "msg_id": mid, "ts": body.get("ts"),
                     "in_reply_to": body.get("in_reply_to"),
                 })
-                if hasattr(res, "__await__"):
+                # Await a coroutine (a deliver that does quick async work), but
+                # NOT a Task: a Task is already scheduled fire-and-forget, and a
+                # sync adapter deliberately returns one so the ACK returns now
+                # while the slow agent turn runs in the background. Awaiting the
+                # Task here would stall the ACK until the turn finished.
+                if inspect.iscoroutine(res):
                     await res
             except Exception as exc:                       # never kill the stream
                 log.warning("deliver failed: %s", exc)
