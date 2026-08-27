@@ -33,7 +33,11 @@ Frameworks expose the agent in one of two shapes, and the adapter follows:
 - **Sync** (OpenClaw): posting a message *runs the agent's turn* and returns its
   reply in the same call (griff-proxy `POST /peer/<name>/agent`). `deliver` asks
   and relays the answer straight back — no outbox, no watcher. Run the blocking
-  call in a thread (`asyncio.to_thread`) so the QUIC loop keeps serving.
+  call in a thread (`asyncio.to_thread`) so the QUIC loop keeps serving. CRITICAL:
+  a sync agent's turn can take tens of seconds, so `deliver` must ACK FAST —
+  schedule the ask as a background task and return immediately, letting the
+  answer arrive later as its own CHAT_MSG. Blocking inside `deliver` stalls the
+  incoming letter's ACK past its timeout.
 
 The mesh does not care which shape an agent is; the reply comes back as a
 CHAT_MSG with `in_reply_to` either way.
@@ -44,7 +48,7 @@ CHAT_MSG with `in_reply_to` either way.
 |-----------|--------------------------------|--------------------------------|-----------|
 | OmegaClaw | `POST /send` (local channel)   | `GET /messages?since=N`        | single-session lock: the node must claim the session first |
 | OpenClaw  | griff-proxy `POST /peer/<name>/agent` (SYNC — reply in same call) | *(same call)* | caller token (X-Proxy-Token) |
-| Hermes    | hermes bridge inbound *(planned)* | `hermes chat -Q` / bridge out | bridge token |
+| Hermes    | griff-proxy `POST /peer/<name>/agent` (SYNC — same as OpenClaw; bridge wraps `hermes chat -Q` in OpenClaw's envelope) | *(same call)* | caller token (X-Proxy-Token) |
 
 The differences are entirely in these two calls and their auth. The protocol,
 the QUIC wire, the dedup, the group fan-out, the reply routing — all identical,

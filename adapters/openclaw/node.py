@@ -85,30 +85,36 @@ async def main():
 
     node = ChatNode(args.id, deliver=None, directory=directory)
 
-    async def deliver(letter):
-        """Sync adapter: ask the agent and relay its reply back to the asker.
+    async def _answer(frm, text, orig_mid):
+        """Do the slow turn and send the reply as a SEPARATE CHAT_MSG.
 
-        Runs the blocking proxy call in a thread so the QUIC event loop keeps
-        serving other streams while the agent thinks (turns can take minutes).
+        Kept off the request handler on purpose: a sync agent's turn can take
+        tens of seconds, but the CHAT_ACK for the incoming letter must return
+        promptly. So deliver() schedules this and returns; the answer arrives
+        later as its own letter, with in_reply_to set. (This is exactly the
+        async-letter model the protocol is built around.)
         """
-        frm = letter["from"]
-        if frm not in directory:
-            return
-        text = letter["text"]
         try:
             reply = await asyncio.to_thread(agent.ask, text)
         except Exception as e:
-            reply = f"[openclaw adapter error: {e}]"
+            reply = f"[adapter error: {e}]"
         if not reply.strip():
             reply = "[no reply]"
         h, p = directory[frm]
         mid = f"{args.id}-{int(time.time()*1000)}"
         try:
-            await node.send_to(frm, reply, msg_id=mid,
-                               in_reply_to=letter.get("msg_id"), host=h, port=p)
+            await node.send_to(frm, reply, msg_id=mid, in_reply_to=orig_mid,
+                               host=h, port=p)
             print(f"[{args.id}] answered {frm}: {reply[:80]}", flush=True)
         except Exception as e:
             print(f"[{args.id}] reply to {frm} failed: {e}", flush=True)
+
+    def deliver(letter):
+        """Ack fast, answer later: schedule the slow turn, return immediately."""
+        frm = letter["from"]
+        if frm not in directory:
+            return
+        asyncio.create_task(_answer(frm, letter["text"], letter.get("msg_id")))
 
     node.deliver = deliver
     cert, key = ensure_cert(CERTS, args.id)
