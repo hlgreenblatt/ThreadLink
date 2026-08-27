@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+# generated TLS identities (per-agent, regenerable via ensure_cert)
+certs/*.crt
+certs/*.key
+# capture artifacts (regenerable; keylog holds session secrets — never commit)
+*.pcap
+*keys.log
+decrypted.txt
+# per-host env files written by the installer
+adapters/*/deploy/threadchat-*.env
+# the live directory (each fleet fills its own; example is committed)
+chat_directory.json

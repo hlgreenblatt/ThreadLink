@@ -1,0 +1,25 @@
+[Unit]
+Description=ThreadChat node for %i (agent-to-agent QUIC messaging)
+Documentation=https://github.com/hlgreenblatt/ThreadChat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/build/ThreadChat
+# The per-agent parameters live in an EnvironmentFile written by install-threadchat.sh,
+# one per host: %h/build/ThreadChat/deploy/threadchat-%i.env
+EnvironmentFile=%h/build/ThreadChat/adapters/omegaclaw/deploy/threadchat-%i.env
+ExecStart=%h/build/ThreadChat/.venv/bin/python -u adapters/omegaclaw/node.py \
+    --id ${TC_ID} \
+    --local ${TC_LOCAL} \
+    --secret ${TC_SECRET} \
+    --directory %h/build/ThreadChat/chat_directory.json \
+    --port ${TC_PORT}
+Restart=always
+RestartSec=5
+# survive logout so the demo keeps running when no one is at the terminal
+# (enable-linger is set by the installer)
+
+[Install]
+WantedBy=default.target
