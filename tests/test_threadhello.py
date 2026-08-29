@@ -157,6 +157,38 @@ async def test_live() -> None:
             check("route pull survives connection migration",
                   before != after and len(tbl.get("rows") or []) == 1)
 
+        # --- event-driven route updates: a capability appears, then withdraws ---
+        print("\nlive route events (MODEL_UPDATE / ROUTE_WITHDRAW)")
+        ev = HelloAgent("ev", RouteStore("ev"), {"p1"})
+        ep0 = srv.epoch
+
+        # MODEL_UPDATE(added): the server learns ev now serves a model on a path.
+        ack = await ev.announce_model("127.0.0.1", 4456,
+                                      action="added", model="free/nemotron", path="p1")
+        check("MODEL_UPDATE added is acked", ack.get("noted") == "free/nemotron")
+        check("server recorded the peer capability",
+              "free/nemotron" in srv.peers_caps.get("ev", set()))
+        check("epoch advanced on capability add", ack.get("epoch") == ep0 + 1)
+
+        # ROUTE_UPDATE: a delta of observations merges without a full table pull.
+        ev.store.observe([1, 1, 1, 0.5, 1, 0, 0, 0], "p1",
+                         {"completed": 1.0, "format_valid": 1.0, "task_fit": 1.0,
+                          "privacy": 1.0, "cost": 0.0, "latency": 1.0})
+        before_rows = len(srv.store)
+        res = await ev.push_update("127.0.0.1", 4456, since=0.0)
+        check("ROUTE_UPDATE delta merged", len(srv.store) == before_rows + res["pushed"])
+
+        # ROUTE_WITHDRAW: the path goes down; its rows are dropped (route-down).
+        ack = await ev.withdraw_route("127.0.0.1", 4456, path="p1")
+        check("ROUTE_WITHDRAW drops the path's rows",
+              all(k[1] != "p1" for k in srv.store._obs))
+        check("epoch advanced on withdraw", ack.get("epoch") > ep0 + 1)
+
+        # MODEL_UPDATE(removed): capability retracts and its route goes with it.
+        ack = await ev.announce_model("127.0.0.1", 4456,
+                                      action="removed", model="free/nemotron", path="p1")
+        check("capability retracted", "free/nemotron" not in srv.peers_caps.get("ev", set()))
+
         server.close()
 
 

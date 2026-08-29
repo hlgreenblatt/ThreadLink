@@ -148,6 +148,14 @@ class RouteStore:
             weight=weight, origin=self.agent_id,
         ), factor=1.0)
 
+    def withdraw_path(self, path):
+        """Drop every observation for a path that has gone down (route-down).
+        Returns how many rows were removed. Used by ROUTE_WITHDRAW / MODEL_UPDATE."""
+        gone = [k for k in self._obs if k[1] == path]
+        for k in gone:
+            del self._obs[k]
+        return len(gone)
+
     # ------------------------------------------------------------ second-hand
     def merge(self, records: Iterable[dict[str, Any]], *,
               known_paths: Optional[set[str]] = None) -> dict[str, int]:

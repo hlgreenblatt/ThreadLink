@@ -48,6 +48,12 @@ class HelloMsg(IntEnum):
     HELLO_ACK = 0x02    # Likewise. Handshake at the application layer.
     ROUTE_REQ = 0x03    # Send me route observations newer than `since`.
     ROUTE_TABLE = 0x04  # A batch of route observations.
+    # --- incremental, event-driven updates (v1 additions) ---
+    # 0x05-0x07 and 0x7F are reserved by the ThreadLink transport (PING/PONG/BYE/ERROR);
+    # ThreadHello's own event types start at 0x08 to keep the type byte unambiguous.
+    ROUTE_UPDATE = 0x08    # A delta: observations that changed since last contact.
+    ROUTE_WITHDRAW = 0x09  # A path is gone; stop routing to it (route-down).
+    MODEL_UPDATE = 0x0A    # An agent's serving capability changed (new/removed model).
 
 
 class HelloAgent:
@@ -70,6 +76,8 @@ class HelloAgent:
         self.known_paths = known_paths
         self.spki = spki
         self.peers_seen: dict[str, dict[str, Any]] = {}
+        self.peers_caps: dict[str, set] = {}   # agent -> set of models it serves
+        self.epoch: int = 0                    # bumps on every topology change
         # Per-peer high-water mark, so each sync ships only what is new.
         self._last_sync: dict[str, float] = {}
 
@@ -107,6 +115,44 @@ class HelloAgent:
             stats = self.store.merge(rows, known_paths=self.known_paths)
             log.info("merged from %s: %s", body.get("agent", "?"), stats)
             return HelloMsg.HELLO_ACK, {"merged": stats, "rows": len(self.store)}
+
+        if msg_type == HelloMsg.ROUTE_UPDATE:
+            # incremental delta — merge just the changed rows (cheaper than a full table)
+            rows = body.get("rows") or []
+            stats = self.store.merge(rows, known_paths=self.known_paths)
+            log.info("ROUTE_UPDATE from %s: %s (%d rows)",
+                     body.get("agent", "?"), stats, len(rows))
+            return HelloMsg.HELLO_ACK, {"merged": stats, "epoch": self.epoch}
+
+        if msg_type == HelloMsg.ROUTE_WITHDRAW:
+            # a path went down — drop every observation for it (route-down)
+            path = str(body.get("path", ""))
+            origin = str(body.get("agent", "?"))
+            removed = self.store.withdraw_path(path) if path else 0
+            self.epoch += 1
+            log.info("ROUTE_WITHDRAW from %s: path=%s dropped %d rows (epoch->%d)",
+                     origin, path, removed, self.epoch)
+            return HelloMsg.HELLO_ACK, {"withdrawn": path, "dropped": removed,
+                                        "epoch": self.epoch}
+
+        if msg_type == HelloMsg.MODEL_UPDATE:
+            # an agent's serving capability changed (loaded/dropped a model)
+            remote = str(body.get("agent", "?"))
+            action = str(body.get("action", "?"))   # "added" | "removed"
+            model = str(body.get("model", "?"))
+            path = str(body.get("path", ""))
+            caps = self.peers_caps.setdefault(remote, set())
+            if action == "added":
+                caps.add(model)
+            elif action == "removed":
+                caps.discard(model)
+                if path:
+                    self.store.withdraw_path(path)   # its routes go too
+            self.epoch += 1
+            log.info("MODEL_UPDATE from %s: %s %s (path=%s, epoch->%d)",
+                     remote, action, model, path, self.epoch)
+            return HelloMsg.HELLO_ACK, {"noted": model, "action": action,
+                                        "epoch": self.epoch}
 
         if msg_type == Control.PING:
             return Control.PONG, {"t": body.get("t"), "agent": self.agent_id}
@@ -168,6 +214,34 @@ class HelloAgent:
                 "peer_merged": res.get("merged"),
                 "rows_now": len(self.store),
             }
+
+    # ----------------------------------------------- event-driven client senders
+    async def announce_model(self, host, port, *, action, model, path=""):
+        """Tell a peer this agent gained ("added") or lost ("removed") a model.
+        The agent-native message: capability changed, re-route accordingly."""
+        async with await dial(host, port) as peer:
+            _t, ack = await peer.request(HelloMsg.MODEL_UPDATE, {
+                "agent": self.agent_id, "action": action,
+                "model": model, "path": path})
+            await peer.send(Control.BYE, {"agent": self.agent_id})
+            return ack
+
+    async def withdraw_route(self, host, port, *, path):
+        """Tell a peer a path is down — stop routing to it (route-down)."""
+        async with await dial(host, port) as peer:
+            _t, ack = await peer.request(HelloMsg.ROUTE_WITHDRAW, {
+                "agent": self.agent_id, "path": path})
+            await peer.send(Control.BYE, {"agent": self.agent_id})
+            return ack
+
+    async def push_update(self, host, port, *, since=0.0):
+        """Push a delta of what changed since `since` (incremental, not full table)."""
+        rows = self.store.export(since=since, limit=500)
+        async with await dial(host, port) as peer:
+            _t, ack = await peer.request(HelloMsg.ROUTE_UPDATE, {
+                "agent": self.agent_id, "rows": rows})
+            await peer.send(Control.BYE, {"agent": self.agent_id})
+            return {"pushed": len(rows), "ack": ack}
 
     async def gossip(self, peers: list[tuple[str, int]]) -> list[dict[str, Any]]:
         """One gossip round against every peer. Failures are reported, not fatal."""
