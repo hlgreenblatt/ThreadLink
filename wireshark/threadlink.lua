@@ -26,7 +26,9 @@ local MAGIC = "TL01"
 local HEADER_LEN = 10
 
 -- ── type byte -> (protocol, name). The transport owns 0x05-0x07 & 0x7F;
---    ThreadHello owns 0x01-0x04; ThreadChat owns 0x10-0x13. ──────────────────
+--    ThreadHello owns 0x01-0x04 (handshake/table) + 0x08-0x0A (route events);
+--    ThreadChat owns 0x10-0x13. The event types deliberately skip 0x05-0x07 so
+--    the byte is never ambiguous between a transport control and a route event.
 local TYPES = {
   [0x01] = {"ThreadHello", "HELLO"},
   [0x02] = {"ThreadHello", "HELLO_ACK"},
@@ -35,6 +37,9 @@ local TYPES = {
   [0x05] = {"ThreadLink",  "PING"},
   [0x06] = {"ThreadLink",  "PONG"},
   [0x07] = {"ThreadLink",  "BYE"},
+  [0x08] = {"ThreadHello", "ROUTE_UPDATE"},    -- delta of changed observations
+  [0x09] = {"ThreadHello", "ROUTE_WITHDRAW"},  -- a path is down (route-down)
+  [0x0A] = {"ThreadHello", "MODEL_UPDATE"},    -- an agent gained/lost a model
   [0x10] = {"ThreadChat",  "CHAT_MSG"},
   [0x11] = {"ThreadChat",  "CHAT_ACK"},
   [0x12] = {"ThreadChat",  "CHAT_WHO"},
@@ -59,10 +64,18 @@ local f_len    = ProtoField.uint32("threadlink.length", "Body length")
 local f_body   = ProtoField.string("threadlink.body",   "Body (JSON)")
 
 -- ── ThreadHello fields (child layer) ───────────────────────────────────────
-local f_h_msg   = ProtoField.string("threadhello.msg",   "Message")
-local f_agent   = ProtoField.string("threadhello.agent", "Agent")
-local f_paths   = ProtoField.string("threadhello.paths", "Paths")
-local f_rows    = ProtoField.uint32("threadhello.rows",  "Rows")
+local f_h_msg   = ProtoField.string("threadhello.msg",    "Message")
+local f_agent   = ProtoField.string("threadhello.agent",  "Agent")
+local f_paths   = ProtoField.string("threadhello.paths",  "Paths")
+local f_rows    = ProtoField.uint32("threadhello.rows",   "Rows")
+local f_action  = ProtoField.string("threadhello.action",   "Action")   -- added / removed
+local f_model   = ProtoField.string("threadhello.model",    "Model")    -- capability that changed
+local f_path    = ProtoField.string("threadhello.path",     "Path")     -- route affected
+local f_epoch   = ProtoField.uint32("threadhello.epoch",    "Epoch")    -- topology version
+local f_mclass  = ProtoField.string("threadhello.model_class","Model class")  -- e.g. local/free
+local f_loc     = ProtoField.string("threadhello.locality", "Locality") -- local | cloud
+local f_cost    = ProtoField.string("threadhello.cost",     "Cost")     -- free | paid
+local f_priv    = ProtoField.string("threadhello.private",  "Private")  -- prompt stays in fleet?
 
 -- ── ThreadChat fields (child layer) ────────────────────────────────────────
 local f_ch_msg  = ProtoField.string("threadchat.msg",     "Message")
@@ -73,7 +86,9 @@ local f_c_mid   = ProtoField.string("threadchat.msg_id",  "Message ID")
 local f_c_reply = ProtoField.string("threadchat.in_reply_to", "In reply to")
 
 proto.fields       = { f_magic, f_type, f_proto, f_name, f_flags, f_len, f_body }
-proto_hello.fields = { f_h_msg, f_agent, f_paths, f_rows }
+proto_hello.fields = { f_h_msg, f_agent, f_paths, f_rows,
+                       f_action, f_model, f_path, f_epoch,
+                       f_mclass, f_loc, f_cost, f_priv }
 proto_chat.fields  = { f_ch_msg, f_c_from, f_c_to, f_c_text, f_c_mid, f_c_reply }
 
 -- tiny JSON string/number field extractor (bodies are small, flat, our own).
@@ -135,9 +150,28 @@ local function dissect_one(tvb, offset, pinfo, tree)
       local ag = jstr(body, "agent"); if ag then app:add(f_agent, body_tvb, ag) end
       local pa = body:match('"paths"%s*:%s*(%b[])'); if pa then app:add(f_paths, body_tvb, pa) end
       local rw = jnum(body, "rows"); if rw then app:add(f_rows, body_tvb, rw) end
+      -- route-event fields (ROUTE_UPDATE / ROUTE_WITHDRAW / MODEL_UPDATE)
+      local ac = jstr(body, "action"); if ac then app:add(f_action, body_tvb, ac) end
+      local mo = jstr(body, "model");  if mo then app:add(f_model,  body_tvb, mo) end
+      local pt = jstr(body, "path");   if pt then app:add(f_path,   body_tvb, pt) end
+      local ep = jnum(body, "epoch");  if ep then app:add(f_epoch,  body_tvb, ep) end
+      -- model provenance: local(private)/cloud, free/paid
+      local mc = jstr(body, "model_class"); if mc then app:add(f_mclass, body_tvb, mc) end
+      local lo = jstr(body, "locality");    if lo then app:add(f_loc,    body_tvb, lo) end
+      local co = jstr(body, "cost");        if co then app:add(f_cost,   body_tvb, co) end
+      local pv = body:match('"private"%s*:%s*(%a+)'); if pv then app:add(f_priv, body_tvb, pv) end
       app:add(f_body, body_tvb)
     end
-    pinfo.cols.info:append("  " .. mname)
+    -- richer info column for the event types: name the model + its class
+    local extra = ""
+    if mname == "MODEL_UPDATE" then
+      local mc = jstr(body,"model_class")
+      extra = string.format(" %s %s%s", jstr(body,"action") or "?",
+        jstr(body,"model") or "?", mc and (" ["..mc.."]") or "")
+    elseif mname == "ROUTE_WITHDRAW" then
+      extra = " " .. (jstr(body,"path") or "?")
+    end
+    pinfo.cols.info:append("  " .. mname .. extra)
   else
     -- transport-owned control message (PING/PONG/BYE/ERROR): body stays on the frame
     if body_tvb then tl:add(f_body, body_tvb) end
