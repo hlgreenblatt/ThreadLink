@@ -56,6 +56,30 @@ class HelloMsg(IntEnum):
     MODEL_UPDATE = 0x0A    # An agent's serving capability changed (new/removed model).
 
 
+def classify_model(*, local: bool, free: bool) -> dict[str, Any]:
+    """Describe a model on the two axes a routing swarm actually cares about.
+
+    locality  — where inference happens. LOCAL means the prompt never leaves the
+                fleet (private); CLOUD means it goes to a third party (not private).
+    cost      — FREE or PAID at point of use.
+
+    These are not cosmetic labels: they map straight onto the route attributes the
+    RouteStore already scores. A local model is privacy=1.0; a cloud one is lower.
+    A free model is cost=0.0; a paid one is >0. Carrying them in the announcement
+    lets a peer honour "keep private work off the cloud" the instant it learns the
+    model exists, instead of discovering the cost after it has routed a secret to it.
+    """
+    locality = "local" if local else "cloud"
+    return {
+        "locality": locality,          # local | cloud
+        "cost": "free" if free else "paid",
+        "private": bool(local),        # local inference == prompt stays in the fleet
+        # the attributes the router scores by, derived from the two axes above
+        "attrs": {"privacy": 1.0 if local else 0.2,
+                  "cost": 0.0 if free else 1.0},
+    }
+
+
 class HelloAgent:
     """A ThreadRouter agent that can meet peers and trade route tables.
 
@@ -77,6 +101,9 @@ class HelloAgent:
         self.spki = spki
         self.peers_seen: dict[str, dict[str, Any]] = {}
         self.peers_caps: dict[str, set] = {}   # agent -> set of models it serves
+        # (agent, model) -> {model_class, locality, cost, private} — provenance,
+        # so a peer can prefer local/private routes and refuse to send secrets to cloud
+        self.peer_model_class: dict[tuple, dict] = {}
         self.epoch: int = 0                    # bumps on every topology change
         # Per-peer high-water mark, so each sync ships only what is new.
         self._last_sync: dict[str, float] = {}
@@ -141,17 +168,27 @@ class HelloAgent:
             action = str(body.get("action", "?"))   # "added" | "removed"
             model = str(body.get("model", "?"))
             path = str(body.get("path", ""))
+            model_class = str(body.get("model_class", "?"))  # e.g. local/free
             caps = self.peers_caps.setdefault(remote, set())
             if action == "added":
                 caps.add(model)
+                # remember what KIND of model this is, for privacy-aware routing
+                self.peer_model_class[(remote, model)] = {
+                    "model_class": model_class,
+                    "locality": body.get("locality", "?"),
+                    "cost": body.get("cost", "?"),
+                    "private": bool(body.get("private", False)),
+                }
             elif action == "removed":
                 caps.discard(model)
+                self.peer_model_class.pop((remote, model), None)
                 if path:
                     self.store.withdraw_path(path)   # its routes go too
             self.epoch += 1
-            log.info("MODEL_UPDATE from %s: %s %s (path=%s, epoch->%d)",
-                     remote, action, model, path, self.epoch)
+            log.info("MODEL_UPDATE from %s: %s %s [%s] (path=%s, epoch->%d)",
+                     remote, action, model, model_class, path, self.epoch)
             return HelloMsg.HELLO_ACK, {"noted": model, "action": action,
+                                        "model_class": model_class,
                                         "epoch": self.epoch}
 
         if msg_type == Control.PING:
@@ -216,13 +253,22 @@ class HelloAgent:
             }
 
     # ----------------------------------------------- event-driven client senders
-    async def announce_model(self, host, port, *, action, model, path=""):
+    async def announce_model(self, host, port, *, action, model, path="",
+                             local=True, free=True):
         """Tell a peer this agent gained ("added") or lost ("removed") a model.
-        The agent-native message: capability changed, re-route accordingly."""
+        The agent-native message: capability changed, re-route accordingly.
+
+        `local`/`free` classify the model (see classify_model): a peer learns not
+        just THAT a model appeared but WHAT KIND — local-private-free vs
+        cloud-not-private — so it can route (or refuse to route) accordingly."""
+        cls = classify_model(local=local, free=free)
         async with await dial(host, port) as peer:
             _t, ack = await peer.request(HelloMsg.MODEL_UPDATE, {
                 "agent": self.agent_id, "action": action,
-                "model": model, "path": path})
+                "model": model, "path": path,
+                "model_class": f"{cls['locality']}/{cls['cost']}",
+                "locality": cls["locality"], "cost": cls["cost"],
+                "private": cls["private"]})
             await peer.send(Control.BYE, {"agent": self.agent_id})
             return ack
 
