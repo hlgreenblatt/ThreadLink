@@ -98,11 +98,14 @@ def classify_model(*, local: bool, free: bool,
     assurance (a certified cloud processor scores better than a raw one), cost
     reflects free/paid.
     """
-    # a sensible default assurance if the caller doesn't state one: a local model
-    # is self-attested by the operator; a cloud model with no stated basis is
-    # unverified until a DPA or attestation is claimed.
+    # Default is ALWAYS "unverified" — for local models too. Assurance is a CLAIM
+    # that must be made explicitly (and ideally later checked); it is never
+    # inferred from where the model runs. "On the fleet" is a data-flow fact, not
+    # an attestation, so a local model with no stated basis stays unverified until
+    # its operator actually asserts self_attested / contractual / certified. Silence
+    # means "no assurance", never "trusted" — the safe direction.
     if not assurance:
-        assurance = "self_attested" if local else "unverified"
+        assurance = "unverified"
     rank = assurance_rank(assurance)
     # privacy: local starts high; cloud starts low but is lifted by assurance,
     # so certified-cloud is not treated the same as unverified-cloud.

@@ -188,6 +188,20 @@ async def test_live() -> None:
         check("local still beats certified cloud on privacy",
               local_m["attrs"]["privacy"] > certified["attrs"]["privacy"])
 
+        # Safe default: assurance is NEVER inferred. A claim-less model — even a
+        # local one — is unverified, never granted a level by where it runs.
+        check("unstated assurance defaults to unverified (local)",
+              classify_model(local=True, free=True)["assurance"] == "unverified")
+        check("unstated assurance defaults to unverified (cloud)",
+              classify_model(local=False, free=True)["assurance"] == "unverified")
+        # and the same on the RECEIVING side: a MODEL_UPDATE that omits assurance
+        # is stored as unverified, not as something more trusting.
+        ack = await ev.announce_model("127.0.0.1", 4456,
+                                      action="added", model="claimless/model", path="p1")
+        check("receiver defaults omitted assurance to unverified",
+              srv.peer_model_class.get(("ev", "claimless/model"), {}).get("assurance")
+              == "unverified")
+
         # ROUTE_UPDATE: a delta of observations merges without a full table pull.
         ev.store.observe([1, 1, 1, 0.5, 1, 0, 0, 0], "p1",
                          {"completed": 1.0, "format_valid": 1.0, "task_fit": 1.0,
