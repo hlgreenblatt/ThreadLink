@@ -73,9 +73,10 @@ local f_model   = ProtoField.string("threadhello.model",    "Model")    -- capab
 local f_path    = ProtoField.string("threadhello.path",     "Path")     -- route affected
 local f_epoch   = ProtoField.uint32("threadhello.epoch",    "Epoch")    -- topology version
 local f_mclass  = ProtoField.string("threadhello.model_class","Model class")  -- e.g. local/free
-local f_loc     = ProtoField.string("threadhello.locality", "Locality") -- local | cloud
-local f_cost    = ProtoField.string("threadhello.cost",     "Cost")     -- free | paid
-local f_priv    = ProtoField.string("threadhello.private",  "Private")  -- prompt stays in fleet?
+local f_loc     = ProtoField.string("threadhello.locality",  "Locality")  -- local | cloud (data-flow)
+local f_cost    = ProtoField.string("threadhello.cost",      "Cost")      -- free | paid
+local f_asr     = ProtoField.string("threadhello.assurance", "Assurance") -- controls backing
+local f_basis   = ProtoField.string("threadhello.basis",     "Assurance basis") -- 3PAO / DPA / ...
 
 -- ── ThreadChat fields (child layer) ────────────────────────────────────────
 local f_ch_msg  = ProtoField.string("threadchat.msg",     "Message")
@@ -88,7 +89,7 @@ local f_c_reply = ProtoField.string("threadchat.in_reply_to", "In reply to")
 proto.fields       = { f_magic, f_type, f_proto, f_name, f_flags, f_len, f_body }
 proto_hello.fields = { f_h_msg, f_agent, f_paths, f_rows,
                        f_action, f_model, f_path, f_epoch,
-                       f_mclass, f_loc, f_cost, f_priv }
+                       f_mclass, f_loc, f_cost, f_asr, f_basis }
 proto_chat.fields  = { f_ch_msg, f_c_from, f_c_to, f_c_text, f_c_mid, f_c_reply }
 
 -- tiny JSON string/number field extractor (bodies are small, flat, our own).
@@ -155,19 +156,22 @@ local function dissect_one(tvb, offset, pinfo, tree)
       local mo = jstr(body, "model");  if mo then app:add(f_model,  body_tvb, mo) end
       local pt = jstr(body, "path");   if pt then app:add(f_path,   body_tvb, pt) end
       local ep = jnum(body, "epoch");  if ep then app:add(f_epoch,  body_tvb, ep) end
-      -- model provenance: local(private)/cloud, free/paid
+      -- model provenance: locality (data-flow) + assurance (controls backing)
       local mc = jstr(body, "model_class"); if mc then app:add(f_mclass, body_tvb, mc) end
       local lo = jstr(body, "locality");    if lo then app:add(f_loc,    body_tvb, lo) end
       local co = jstr(body, "cost");        if co then app:add(f_cost,   body_tvb, co) end
-      local pv = body:match('"private"%s*:%s*(%a+)'); if pv then app:add(f_priv, body_tvb, pv) end
+      local as = jstr(body, "assurance");   if as then app:add(f_asr,    body_tvb, as) end
+      local ba = jstr(body, "basis"); if ba and ba ~= "" then app:add(f_basis, body_tvb, ba) end
       app:add(f_body, body_tvb)
     end
-    -- richer info column for the event types: name the model + its class
+    -- richer info column for the event types: model, class, and assurance level
     local extra = ""
     if mname == "MODEL_UPDATE" then
       local mc = jstr(body,"model_class")
-      extra = string.format(" %s %s%s", jstr(body,"action") or "?",
-        jstr(body,"model") or "?", mc and (" ["..mc.."]") or "")
+      local as = jstr(body,"assurance")
+      extra = string.format(" %s %s%s%s", jstr(body,"action") or "?",
+        jstr(body,"model") or "?", mc and (" ["..mc.."]") or "",
+        as and (" "..as) or "")
     elseif mname == "ROUTE_WITHDRAW" then
       extra = " " .. (jstr(body,"path") or "?")
     end

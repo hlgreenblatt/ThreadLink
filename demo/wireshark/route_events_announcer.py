@@ -19,11 +19,17 @@ sys.path.insert(0, str(Path.home() / "build/ThreadLink"))
 
 from threadhello import HelloAgent, RouteStore
 
-# Two models of DIFFERENT provenance, so the local/cloud distinction is on the wire:
-LOCAL_MODEL = "ollama/qwen3.8-27b"          # runs on the fleet — private & free
+# Three models spanning the assurance ladder — locality and CONTROLS are
+# separate questions, and the wire says both:
+#   LOCAL      on the fleet, self-attested by the operator
+#   CLOUD certified   third-party BUT under a 3PAO/FedRAMP attestation (defensible)
+#   CLOUD unverified  third-party free tier, no DPA, no assessment (the risky one)
+LOCAL_MODEL = "ollama/qwen3.8-27b"
 LOCAL_PATH = "local_chat"
-CLOUD_MODEL = "openrouter/nemotron-nano-free"  # third-party — not private (free tier)
-CLOUD_PATH = "cloud_free"
+CERT_MODEL = "bedrock/claude-sonnet"           # a cloud PROCESSOR under attestation
+CERT_PATH = "cloud_certified"
+RAW_MODEL = "openrouter/nemotron-nano-free"     # free tier, no controls basis
+RAW_PATH = "cloud_free"
 
 
 async def main() -> None:
@@ -31,51 +37,71 @@ async def main() -> None:
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 4433
 
     ellie = HelloAgent("agent_ellie", RouteStore("agent_ellie"),
-                       known_paths={"cloud_free", "local_chat", "local_code"})
+                       known_paths={"cloud_free", "cloud_certified",
+                                    "local_chat", "local_code"})
 
     print(f"[ellie] --> {peer_ip}:{port}", flush=True)
     await asyncio.sleep(0.3)  # let the listener settle / capture arm
 
     t0 = time.time()
-    # 1a. Ellie pulls a new model onto the fleet — LOCAL: private and free.
-    print(f"[ellie] 1a. loaded {LOCAL_MODEL} on the fleet — announcing "
-          "MODEL_UPDATE added [local/free, private]", flush=True)
+    # 1a. LOCAL model on the fleet — self-attested (no third party in the loop).
+    print(f"[ellie] 1a. loaded {LOCAL_MODEL} on the fleet "
+          "[local/free, assurance=self_attested]", flush=True)
     ack = await ellie.announce_model(peer_ip, port, action="added",
                                      model=LOCAL_MODEL, path=LOCAL_PATH,
-                                     local=True, free=True)
-    print(f"[ellie]     acked [{ack.get('model_class')}], peer epoch = {ack.get('epoch')}",
-          flush=True)
+                                     local=True, free=True,
+                                     assurance="self_attested",
+                                     basis="operator-run on fleet hardware")
+    print(f"[ellie]     acked [{ack.get('model_class')}, {ack.get('assurance')}], "
+          f"peer epoch = {ack.get('epoch')}", flush=True)
 
-    # 1b. Ellie also gains a free CLOUD model — NOT private (leaves the fleet).
-    print(f"[ellie] 1b. gained {CLOUD_MODEL} — announcing "
-          "MODEL_UPDATE added [cloud/free, NOT private]", flush=True)
+    # 1b. CLOUD but CERTIFIED — a data processor under a 3PAO attestation. Leaves
+    #     the fleet, yet its controls are independently assessed.
+    print(f"[ellie] 1b. gained {CERT_MODEL} "
+          "[cloud/paid, assurance=certified — 3PAO/FedRAMP]", flush=True)
     ack = await ellie.announce_model(peer_ip, port, action="added",
-                                     model=CLOUD_MODEL, path=CLOUD_PATH,
-                                     local=False, free=True)
-    print(f"[ellie]     acked [{ack.get('model_class')}], peer epoch = {ack.get('epoch')}",
-          flush=True)
+                                     model=CERT_MODEL, path=CERT_PATH,
+                                     local=False, free=False,
+                                     assurance="certified",
+                                     basis="3PAO / FedRAMP Moderate + DPA Art.28")
+    print(f"[ellie]     acked [{ack.get('model_class')}, {ack.get('assurance')}], "
+          f"peer epoch = {ack.get('epoch')}", flush=True)
 
-    # 2. Ellie shares a route observation for the cloud model (ROUTE_UPDATE delta).
-    ellie.store.observe([1.0, 1.0, 1.0, 0.2, 1.0, 0.0, 0.0, 0.0], CLOUD_PATH,
+    # 1c. CLOUD and UNVERIFIED — free tier, no DPA, no assessment. This is the one
+    #     a privacy-aware peer should refuse for anything sensitive.
+    print(f"[ellie] 1c. gained {RAW_MODEL} "
+          "[cloud/free, assurance=unverified — no DPA]", flush=True)
+    ack = await ellie.announce_model(peer_ip, port, action="added",
+                                     model=RAW_MODEL, path=RAW_PATH,
+                                     local=False, free=True,
+                                     assurance="unverified",
+                                     basis="")
+    print(f"[ellie]     acked [{ack.get('model_class')}, {ack.get('assurance')}], "
+          f"peer epoch = {ack.get('epoch')}", flush=True)
+
+    # 2. Share a route observation for the unverified cloud path (ROUTE_UPDATE).
+    ellie.store.observe([1.0, 1.0, 1.0, 0.1, 1.0, 0.0, 0.0, 0.0], RAW_PATH,
                         {"completed": 1.0, "format_valid": 1.0, "task_fit": 1.0,
-                         "privacy": 0.2, "cost": 0.0, "latency": 1.0})
+                         "privacy": 0.1, "cost": 0.0, "latency": 1.0})
     res = await ellie.push_update(peer_ip, port, since=0.0)
     print(f"[ellie] 2.  shared {res['pushed']} route row(s) (ROUTE_UPDATE)", flush=True)
 
-    await asyncio.sleep(0.3)  # the models are "used" for a moment
+    await asyncio.sleep(0.3)
 
-    # 3. The cloud access expires; withdraw its path (route-down)...
-    print(f"[ellie] 3.  cloud access expired; withdrawing {CLOUD_PATH} "
+    # 3. The unverified free tier is pulled first (route-down)...
+    print(f"[ellie] 3.  unverified cloud pulled; withdrawing {RAW_PATH} "
           "(ROUTE_WITHDRAW)", flush=True)
-    await ellie.withdraw_route(peer_ip, port, path=CLOUD_PATH)
+    await ellie.withdraw_route(peer_ip, port, path=RAW_PATH)
 
-    # 4. ...then retract the cloud capability (MODEL_UPDATE removed).
-    print(f"[ellie] 4.  retracting {CLOUD_MODEL} (MODEL_UPDATE removed)", flush=True)
+    # 4. ...and retract that model. The local and CERTIFIED cloud models remain.
+    print(f"[ellie] 4.  retracting {RAW_MODEL} (MODEL_UPDATE removed)", flush=True)
     ack = await ellie.announce_model(peer_ip, port, action="removed",
-                                     model=CLOUD_MODEL, path=CLOUD_PATH,
-                                     local=False, free=True)
+                                     model=RAW_MODEL, path=RAW_PATH,
+                                     local=False, free=True,
+                                     assurance="unverified")
     conv_ms = (time.time() - t0) * 1000
-    print(f"[ellie]     done. The local model stays; the cloud one is gone. "
+    print(f"[ellie]     done. Kept: local (self_attested) + certified cloud. "
+          f"Dropped: the unverified free tier. "
           f"add->share->withdraw->remove in {conv_ms:.0f} ms, "
           f"final peer epoch = {ack.get('epoch')}", flush=True)
 

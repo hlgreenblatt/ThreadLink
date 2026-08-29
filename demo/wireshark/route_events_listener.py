@@ -44,8 +44,12 @@ async def main() -> None:
             act, mdl = body.get("action"), body.get("model")
             caps = node.peers_caps.get(body.get("agent", "?"), set())
             cls = body.get("model_class", "?")
+            asr = body.get("assurance", "?")
+            basis = body.get("basis", "")
+            tail = f" — {basis}" if basis else ""
             print(f"[sister] MODEL_UPDATE: {body.get('agent')} {act} {mdl} "
-                  f"[{cls}] -> now serves {sorted(caps)} (epoch {node.epoch})", flush=True)
+                  f"[{cls}, assurance={asr}{tail}] -> now serves {sorted(caps)} "
+                  f"(epoch {node.epoch})", flush=True)
             if act == "removed":
                 done.set()
         elif msg_type == HelloMsg.ROUTE_UPDATE:
