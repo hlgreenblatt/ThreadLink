@@ -42,33 +42,39 @@ local TYPES = {
   [0x7F] = {"ThreadLink",  "ERROR"},
 }
 
-local proto = Proto("threadlink", "ThreadLink agent comlink")
+-- Three protocol layers, nested: ThreadLink (transport frame) carries a riding
+-- protocol (ThreadHello or ThreadChat) as a CHILD sub-tree. Clicking the
+-- ThreadLink frame shows which app rides it; expanding that app shows its fields.
+local proto       = Proto("threadlink",  "ThreadLink agent comlink")
+local proto_hello = Proto("threadhello", "ThreadHello route exchange")
+local proto_chat  = Proto("threadchat",  "ThreadChat agent messaging")
 
--- ── header fields ──────────────────────────────────────────────────────────
+-- ── ThreadLink transport header fields ─────────────────────────────────────
 local f_magic  = ProtoField.string("threadlink.magic",  "Magic")
 local f_type   = ProtoField.uint8 ("threadlink.type",   "Type", base.HEX)
-local f_proto  = ProtoField.string("threadlink.proto",  "Protocol")
+local f_proto  = ProtoField.string("threadlink.proto",  "Riding protocol")
 local f_name   = ProtoField.string("threadlink.msg",    "Message")
 local f_flags  = ProtoField.uint8 ("threadlink.flags",  "Flags", base.HEX)
 local f_len    = ProtoField.uint32("threadlink.length", "Body length")
 local f_body   = ProtoField.string("threadlink.body",   "Body (JSON)")
 
--- ── broken-out JSON fields, so you can filter on them ──────────────────────
--- ThreadHello / ThreadChat share some ("agent"); each also has its own.
-local f_agent  = ProtoField.string("threadhello.agent", "Agent")
-local f_paths  = ProtoField.string("threadhello.paths", "Paths")
-local f_rows   = ProtoField.uint32("threadhello.rows",  "Rows")
-local f_c_from = ProtoField.string("threadchat.from",   "From")
-local f_c_to   = ProtoField.string("threadchat.to",     "To")
-local f_c_text = ProtoField.string("threadchat.text",   "Text")
-local f_c_mid  = ProtoField.string("threadchat.msg_id", "Message ID")
-local f_c_reply= ProtoField.string("threadchat.in_reply_to", "In reply to")
+-- ── ThreadHello fields (child layer) ───────────────────────────────────────
+local f_h_msg   = ProtoField.string("threadhello.msg",   "Message")
+local f_agent   = ProtoField.string("threadhello.agent", "Agent")
+local f_paths   = ProtoField.string("threadhello.paths", "Paths")
+local f_rows    = ProtoField.uint32("threadhello.rows",  "Rows")
 
-proto.fields = {
-  f_magic, f_type, f_proto, f_name, f_flags, f_len, f_body,
-  f_agent, f_paths, f_rows,
-  f_c_from, f_c_to, f_c_text, f_c_mid, f_c_reply,
-}
+-- ── ThreadChat fields (child layer) ────────────────────────────────────────
+local f_ch_msg  = ProtoField.string("threadchat.msg",     "Message")
+local f_c_from  = ProtoField.string("threadchat.from",    "From")
+local f_c_to    = ProtoField.string("threadchat.to",      "To")
+local f_c_text  = ProtoField.string("threadchat.text",    "Text")
+local f_c_mid   = ProtoField.string("threadchat.msg_id",  "Message ID")
+local f_c_reply = ProtoField.string("threadchat.in_reply_to", "In reply to")
+
+proto.fields       = { f_magic, f_type, f_proto, f_name, f_flags, f_len, f_body }
+proto_hello.fields = { f_h_msg, f_agent, f_paths, f_rows }
+proto_chat.fields  = { f_ch_msg, f_c_from, f_c_to, f_c_text, f_c_mid, f_c_reply }
 
 -- tiny JSON string/number field extractor (bodies are small, flat, our own).
 -- Not a full parser: pulls "key":"value" and "key":number for the keys we name.
@@ -94,38 +100,47 @@ local function dissect_one(tvb, offset, pinfo, tree)
   local meta = TYPES[typ] or {"ThreadLink", string.format("UNKNOWN(0x%02X)", typ)}
   local pname, mname = meta[1], meta[2]
 
-  local sub = tree:add(proto, tvb(offset, total),
-                       string.format("%s: %s", pname, mname))
-  sub:add(f_magic, tvb(offset, 4))
-  sub:add(f_type,  tvb(offset + 4, 1))
-  sub:add(f_proto, tvb(offset + 4, 1), pname)
-  sub:add(f_name,  tvb(offset + 4, 1), mname)
-  sub:add(f_flags, tvb(offset + 5, 1))
-  sub:add(f_len,   tvb(offset + 6, 4))
+  -- OUTER layer: the ThreadLink transport frame (header only).
+  local tl = tree:add(proto, tvb(offset, total),
+                      string.format("ThreadLink, Type: %s (%s)", mname, pname))
+  tl:add(f_magic, tvb(offset, 4))
+  tl:add(f_type,  tvb(offset + 4, 1)):append_text("  (" .. mname .. ")")
+  tl:add(f_proto, tvb(offset + 4, 1), pname)
+  tl:add(f_flags, tvb(offset + 5, 1))
+  tl:add(f_len,   tvb(offset + 6, 4))
 
-  if blen > 0 then
-    local body_tvb = tvb(offset + HEADER_LEN, blen)
-    local body = body_tvb:string()
-    sub:add(f_body, body_tvb)
+  local body_tvb = blen > 0 and tvb(offset + HEADER_LEN, blen) or nil
+  local body = body_tvb and body_tvb:string() or ""
 
-    -- break out the fields we know, per protocol
-    if pname == "ThreadChat" then
-      local frm = jstr(body, "from"); if frm then sub:add(f_c_from, body_tvb, frm) end
-      local to  = jstr(body, "to");   if to  then sub:add(f_c_to,   body_tvb, to)  end
-      local txt = jstr(body, "text"); if txt then sub:add(f_c_text, body_tvb, txt) end
-      local mid = jstr(body, "msg_id"); if mid then sub:add(f_c_mid, body_tvb, mid) end
-      local rep = jstr(body, "in_reply_to"); if rep then sub:add(f_c_reply, body_tvb, rep) end
-      pinfo.cols.info:append(string.format("  %s %s->%s", mname,
-        jstr(body,"from") or "?", jstr(body,"to") or "?"))
-    elseif pname == "ThreadHello" then
-      local ag = jstr(body, "agent"); if ag then sub:add(f_agent, body_tvb, ag) end
-      local pa = body:match('"paths"%s*:%s*(%b[])'); if pa then sub:add(f_paths, body_tvb, pa) end
-      local rw = jnum(body, "rows"); if rw then sub:add(f_rows, body_tvb, rw) end
-      pinfo.cols.info:append("  " .. mname)
-    else
-      pinfo.cols.info:append("  " .. mname)
+  -- CHILD layer: the riding protocol, nested UNDER the ThreadLink frame.
+  if pname == "ThreadChat" then
+    local app = tl:add(proto_chat, body_tvb or tvb(offset, 0),
+                       "ThreadChat: " .. mname)
+    app:add(f_ch_msg, tvb(offset + 4, 1), mname)
+    if body_tvb then
+      local frm = jstr(body, "from"); if frm then app:add(f_c_from, body_tvb, frm) end
+      local to  = jstr(body, "to");   if to  then app:add(f_c_to,   body_tvb, to)  end
+      local txt = jstr(body, "text"); if txt then app:add(f_c_text, body_tvb, txt) end
+      local mid = jstr(body, "msg_id"); if mid then app:add(f_c_mid, body_tvb, mid) end
+      local rep = jstr(body, "in_reply_to"); if rep then app:add(f_c_reply, body_tvb, rep) end
+      app:add(f_body, body_tvb)
     end
+    pinfo.cols.info:append(string.format("  %s %s->%s", mname,
+      jstr(body, "from") or "?", jstr(body, "to") or "?"))
+  elseif pname == "ThreadHello" then
+    local app = tl:add(proto_hello, body_tvb or tvb(offset, 0),
+                       "ThreadHello: " .. mname)
+    app:add(f_h_msg, tvb(offset + 4, 1), mname)
+    if body_tvb then
+      local ag = jstr(body, "agent"); if ag then app:add(f_agent, body_tvb, ag) end
+      local pa = body:match('"paths"%s*:%s*(%b[])'); if pa then app:add(f_paths, body_tvb, pa) end
+      local rw = jnum(body, "rows"); if rw then app:add(f_rows, body_tvb, rw) end
+      app:add(f_body, body_tvb)
+    end
+    pinfo.cols.info:append("  " .. mname)
   else
+    -- transport-owned control message (PING/PONG/BYE/ERROR): body stays on the frame
+    if body_tvb then tl:add(f_body, body_tvb) end
     pinfo.cols.info:append("  " .. mname)
   end
 
