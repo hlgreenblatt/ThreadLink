@@ -56,26 +56,67 @@ class HelloMsg(IntEnum):
     MODEL_UPDATE = 0x0A    # An agent's serving capability changed (new/removed model).
 
 
-def classify_model(*, local: bool, free: bool) -> dict[str, Any]:
-    """Describe a model on the two axes a routing swarm actually cares about.
+# Assurance ladder — how much the CONTROLS around a model are backed, ordered
+# weakest to strongest. This is deliberately separate from `locality`: a cloud
+# processor under a signed DPA + a 3PAO attestation can be MORE defensible than
+# an unvetted local box, so the two questions must not be collapsed into one flag.
+#   unverified    — nothing known / no basis claimed
+#   self_attested — the operator asserts controls, no third party involved
+#   contractual   — a binding data-processing agreement (GDPR Art.28 processor)
+#   certified     — independently assessed (3PAO / FedRAMP / ISO 27001 / SOC 2)
+ASSURANCE_LADDER = ("unverified", "self_attested", "contractual", "certified")
+
+
+def assurance_rank(level: str) -> int:
+    """Position on the ladder (higher = stronger). Unknown terms rank lowest."""
+    try:
+        return ASSURANCE_LADDER.index(level)
+    except ValueError:
+        return 0
+
+
+def classify_model(*, local: bool, free: bool,
+                   assurance: str = "", basis: str = "") -> dict[str, Any]:
+    """Describe a model on the axes a routing swarm actually acts on.
 
     locality  — where inference happens. LOCAL means the prompt never leaves the
-                fleet (private); CLOUD means it goes to a third party (not private).
+                fleet; CLOUD means it goes to a third party.
     cost      — FREE or PAID at point of use.
+    assurance — how well the controls around the model are BACKED, on the
+                ASSURANCE_LADDER (unverified < self_attested < contractual <
+                certified). `basis` is the free-text ground for it, e.g.
+                "DPA / GDPR Art.28" or "3PAO / FedRAMP Moderate".
 
-    These are not cosmetic labels: they map straight onto the route attributes the
-    RouteStore already scores. A local model is privacy=1.0; a cloud one is lower.
-    A free model is cost=0.0; a paid one is >0. Carrying them in the announcement
-    lets a peer honour "keep private work off the cloud" the instant it learns the
-    model exists, instead of discovering the cost after it has routed a secret to it.
+    Locality and assurance are orthogonal on purpose. "Did the prompt leave the
+    fleet?" is a data-flow fact; "is the party that received it under an assessed
+    control regime?" is a governance fact (data controller vs processor, 3PAO
+    attestation, risk-acceptance of controls). A router may keep secret work
+    local AND require assurance>=contractual before it will use any cloud route —
+    two independent gates, not one boolean.
+
+    These map onto the RouteStore attributes: privacy reflects locality lifted by
+    assurance (a certified cloud processor scores better than a raw one), cost
+    reflects free/paid.
     """
-    locality = "local" if local else "cloud"
+    # a sensible default assurance if the caller doesn't state one: a local model
+    # is self-attested by the operator; a cloud model with no stated basis is
+    # unverified until a DPA or attestation is claimed.
+    if not assurance:
+        assurance = "self_attested" if local else "unverified"
+    rank = assurance_rank(assurance)
+    # privacy: local starts high; cloud starts low but is lifted by assurance,
+    # so certified-cloud is not treated the same as unverified-cloud.
+    if local:
+        privacy = 1.0
+    else:
+        privacy = 0.1 + 0.25 * rank        # unverified 0.10 .. certified 0.85
     return {
-        "locality": locality,          # local | cloud
+        "locality": "local" if local else "cloud",
         "cost": "free" if free else "paid",
-        "private": bool(local),        # local inference == prompt stays in the fleet
-        # the attributes the router scores by, derived from the two axes above
-        "attrs": {"privacy": 1.0 if local else 0.2,
+        "assurance": assurance,            # unverified|self_attested|contractual|certified
+        "assurance_rank": rank,
+        "basis": basis,                    # free text: what backs the assurance
+        "attrs": {"privacy": round(privacy, 3),
                   "cost": 0.0 if free else 1.0},
     }
 
@@ -169,15 +210,20 @@ class HelloAgent:
             model = str(body.get("model", "?"))
             path = str(body.get("path", ""))
             model_class = str(body.get("model_class", "?"))  # e.g. local/free
+            assurance = str(body.get("assurance", "unverified"))
+            basis = str(body.get("basis", ""))
             caps = self.peers_caps.setdefault(remote, set())
             if action == "added":
                 caps.add(model)
-                # remember what KIND of model this is, for privacy-aware routing
+                # remember what KIND of model this is, for assurance-aware routing:
+                # locality (data-flow) AND assurance (controls) are stored apart.
                 self.peer_model_class[(remote, model)] = {
                     "model_class": model_class,
                     "locality": body.get("locality", "?"),
                     "cost": body.get("cost", "?"),
-                    "private": bool(body.get("private", False)),
+                    "assurance": assurance,
+                    "assurance_rank": assurance_rank(assurance),
+                    "basis": basis,
                 }
             elif action == "removed":
                 caps.discard(model)
@@ -185,10 +231,11 @@ class HelloAgent:
                 if path:
                     self.store.withdraw_path(path)   # its routes go too
             self.epoch += 1
-            log.info("MODEL_UPDATE from %s: %s %s [%s] (path=%s, epoch->%d)",
-                     remote, action, model, model_class, path, self.epoch)
+            log.info("MODEL_UPDATE from %s: %s %s [%s, assurance=%s] (path=%s, epoch->%d)",
+                     remote, action, model, model_class, assurance, path, self.epoch)
             return HelloMsg.HELLO_ACK, {"noted": model, "action": action,
                                         "model_class": model_class,
+                                        "assurance": assurance,
                                         "epoch": self.epoch}
 
         if msg_type == Control.PING:
@@ -254,21 +301,25 @@ class HelloAgent:
 
     # ----------------------------------------------- event-driven client senders
     async def announce_model(self, host, port, *, action, model, path="",
-                             local=True, free=True):
+                             local=True, free=True, assurance="", basis=""):
         """Tell a peer this agent gained ("added") or lost ("removed") a model.
         The agent-native message: capability changed, re-route accordingly.
 
-        `local`/`free` classify the model (see classify_model): a peer learns not
-        just THAT a model appeared but WHAT KIND — local-private-free vs
-        cloud-not-private — so it can route (or refuse to route) accordingly."""
-        cls = classify_model(local=local, free=free)
+        classify_model puts the model on the axes a peer routes by: `local`/`free`
+        say WHERE it runs and what it costs; `assurance`/`basis` say how well the
+        controls around it are BACKED (unverified < self_attested < contractual <
+        certified — e.g. a cloud processor under a DPA, or a 3PAO attestation). A
+        peer can then keep secrets local AND require assurance>=contractual before
+        touching any cloud route — the instant it learns the model exists."""
+        cls = classify_model(local=local, free=free,
+                             assurance=assurance, basis=basis)
         async with await dial(host, port) as peer:
             _t, ack = await peer.request(HelloMsg.MODEL_UPDATE, {
                 "agent": self.agent_id, "action": action,
                 "model": model, "path": path,
                 "model_class": f"{cls['locality']}/{cls['cost']}",
                 "locality": cls["locality"], "cost": cls["cost"],
-                "private": cls["private"]})
+                "assurance": cls["assurance"], "basis": cls["basis"]})
             await peer.send(Control.BYE, {"agent": self.agent_id})
             return ack
 

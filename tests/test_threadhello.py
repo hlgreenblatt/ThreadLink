@@ -162,13 +162,31 @@ async def test_live() -> None:
         ev = HelloAgent("ev", RouteStore("ev"), {"p1"})
         ep0 = srv.epoch
 
-        # MODEL_UPDATE(added): the server learns ev now serves a model on a path.
+        # MODEL_UPDATE(added): the server learns ev now serves a model on a path,
+        # WITH its assurance level (a cloud processor under a DPA/attestation).
         ack = await ev.announce_model("127.0.0.1", 4456,
-                                      action="added", model="free/nemotron", path="p1")
+                                      action="added", model="free/nemotron", path="p1",
+                                      local=False, free=True,
+                                      assurance="contractual", basis="DPA / Art.28")
         check("MODEL_UPDATE added is acked", ack.get("noted") == "free/nemotron")
         check("server recorded the peer capability",
               "free/nemotron" in srv.peers_caps.get("ev", set()))
         check("epoch advanced on capability add", ack.get("epoch") == ep0 + 1)
+        check("assurance level recorded",
+              srv.peer_model_class.get(("ev", "free/nemotron"), {}).get("assurance")
+              == "contractual")
+        check("assurance echoed in ack", ack.get("assurance") == "contractual")
+
+        # locality and assurance are orthogonal: a certified cloud model scores
+        # higher privacy than an unverified one, but never as high as local.
+        from threadhello import classify_model
+        certified = classify_model(local=False, free=False, assurance="certified")
+        unverified = classify_model(local=False, free=True, assurance="unverified")
+        local_m = classify_model(local=True, free=True)
+        check("certified cloud beats unverified cloud on privacy",
+              certified["attrs"]["privacy"] > unverified["attrs"]["privacy"])
+        check("local still beats certified cloud on privacy",
+              local_m["attrs"]["privacy"] > certified["attrs"]["privacy"])
 
         # ROUTE_UPDATE: a delta of observations merges without a full table pull.
         ev.store.observe([1, 1, 1, 0.5, 1, 0, 0, 0], "p1",

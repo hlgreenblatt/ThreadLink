@@ -7,11 +7,15 @@ agents talk at all?" — and lives in its own repo, because it is useful to
 agents that have never heard of routing.
 """
 
-from .hello import HelloAgent, HelloMsg, HELLO_VERSION
+from .hello import (
+    HelloAgent, HelloMsg, HELLO_VERSION,
+    classify_model, assurance_rank, ASSURANCE_LADDER,
+)
 from .routeshare import RouteStore, Observation, cell_key, fp_of_cell, ATTRS
 
 __version__ = "0.2.0"
 __all__ = [
     "HelloAgent", "HelloMsg", "HELLO_VERSION",
+    "classify_model", "assurance_rank", "ASSURANCE_LADDER",
     "RouteStore", "Observation", "cell_key", "fp_of_cell", "ATTRS",
 ]
