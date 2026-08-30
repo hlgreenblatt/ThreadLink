@@ -138,11 +138,18 @@ class HelloAgent:
         store: Optional[RouteStore] = None,
         known_paths: Optional[set[str]] = None,
         spki: str = "",
+        certfile: Optional[str] = None,
+        keyfile: Optional[str] = None,
     ) -> None:
         self.agent_id = agent_id
         self.store = store or RouteStore(agent_id)
         self.known_paths = known_paths
         self.spki = spki
+        # An agent's identity certificate — used BOTH to serve and, because
+        # ThreadLink is mutually authenticated, to dial. serve() may also set
+        # these; a constructor value lets a client-only agent authenticate too.
+        self._certfile = certfile
+        self._keyfile = keyfile
         self.peers_seen: dict[str, dict[str, Any]] = {}
         self.peers_caps: dict[str, set] = {}   # agent -> set of models it serves
         # (agent, model) -> {model_class, locality, cost, private} — provenance,
@@ -261,15 +268,24 @@ class HelloAgent:
 
     async def serve(self, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     *, certfile: str, keyfile: str):
+        # Remember our own credential: ThreadLink is mutually authenticated, so we
+        # present this same cert when we DIAL a peer, not only when we serve.
+        self._certfile, self._keyfile = certfile, keyfile
         log.info("%s listening on udp/%s:%d", self.agent_id, host, port)
         return await listen(self.handle, host, port,
                             certfile=certfile, keyfile=keyfile)
+
+    def _client_creds(self) -> dict[str, str]:
+        """Our cert as client credentials for mutual-auth dialing (empty if unset)."""
+        cf = getattr(self, "_certfile", None)
+        kf = getattr(self, "_keyfile", None)
+        return {"certfile": cf, "keyfile": kf} if cf and kf else {}
 
     # ----------------------------------------------------------------- client
     async def sync_with(self, host: str, port: int = DEFAULT_PORT) -> dict[str, Any]:
         """Meet a peer and trade route tables. One connection, four exchanges."""
         t0 = time.perf_counter()
-        async with await dial(host, port) as peer:
+        async with await dial(host, port, **self._client_creds()) as peer:
             hs_ms = peer.handshake_ms
 
             _t, ack = await peer.request(HelloMsg.HELLO, self._identity())
@@ -316,7 +332,7 @@ class HelloAgent:
         touching any cloud route — the instant it learns the model exists."""
         cls = classify_model(local=local, free=free,
                              assurance=assurance, basis=basis)
-        async with await dial(host, port) as peer:
+        async with await dial(host, port, **self._client_creds()) as peer:
             _t, ack = await peer.request(HelloMsg.MODEL_UPDATE, {
                 "agent": self.agent_id, "action": action,
                 "model": model, "path": path,
@@ -328,7 +344,7 @@ class HelloAgent:
 
     async def withdraw_route(self, host, port, *, path):
         """Tell a peer a path is down — stop routing to it (route-down)."""
-        async with await dial(host, port) as peer:
+        async with await dial(host, port, **self._client_creds()) as peer:
             _t, ack = await peer.request(HelloMsg.ROUTE_WITHDRAW, {
                 "agent": self.agent_id, "path": path})
             await peer.send(Control.BYE, {"agent": self.agent_id})
@@ -337,7 +353,7 @@ class HelloAgent:
     async def push_update(self, host, port, *, since=0.0):
         """Push a delta of what changed since `since` (incremental, not full table)."""
         rows = self.store.export(since=since, limit=500)
-        async with await dial(host, port) as peer:
+        async with await dial(host, port, **self._client_creds()) as peer:
             _t, ack = await peer.request(HelloMsg.ROUTE_UPDATE, {
                 "agent": self.agent_id, "rows": rows})
             await peer.send(Control.BYE, {"agent": self.agent_id})

@@ -131,7 +131,11 @@ async def test_live() -> None:
                            "privacy": 1.0, "cost": 0.0, "latency": 0.3})
         server = await srv.serve("127.0.0.1", 4456, certfile=cert, keyfile=key)
 
-        cli = HelloAgent("cli", RouteStore("cli"), {"p1"})
+        # every agent carries its own identity cert — ThreadLink is mutually
+        # authenticated, so the client must present one when it dials.
+        ccert, ckey = ensure_cert(d, "cli", ["127.0.0.1"])
+        cli = HelloAgent("cli", RouteStore("cli"), {"p1"},
+                         certfile=ccert, keyfile=ckey)
         res = await cli.sync_with("127.0.0.1", 4456)
         check("handshake completed", res["handshake_ms"] is not None)
         check("route row pulled over QUIC", res["pulled"]["accepted"] == 1)
@@ -141,7 +145,9 @@ async def test_live() -> None:
         check("server saw the client's HELLO", "cli" in srv.peers_seen)
 
         # Protocol version mismatch must be refused clearly, not silently.
-        async with await dial("127.0.0.1", 4456, config=client_config()) as peer:
+        # (client_config carries the client's own cert for mutual auth)
+        async with await dial("127.0.0.1", 4456,
+                              config=client_config(certfile=ccert, keyfile=ckey)) as peer:
             _t, ack = await peer.request(HelloMsg.HELLO, {"agent": "old", "proto": 99})
             check("version mismatch refused", ack.get("error") == "protocol_mismatch")
 
@@ -159,7 +165,9 @@ async def test_live() -> None:
 
         # --- event-driven route updates: a capability appears, then withdraws ---
         print("\nlive route events (MODEL_UPDATE / ROUTE_WITHDRAW)")
-        ev = HelloAgent("ev", RouteStore("ev"), {"p1"})
+        evcert, evkey = ensure_cert(d, "ev", ["127.0.0.1"])
+        ev = HelloAgent("ev", RouteStore("ev"), {"p1"},
+                        certfile=evcert, keyfile=evkey)
         ep0 = srv.epoch
 
         # MODEL_UPDATE(added): the server learns ev now serves a model on a path,
