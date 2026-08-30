@@ -6,13 +6,16 @@ ThreadHello (route-table gossip for ThreadRouter agents) is the first, and
 lives with ThreadRouter, not here.
 """
 
-from .wire import Control, MAX_BODY, encode, decode, FrameReader, WireError
+from .wire import (
+    Control, ThreadLinkError, MAX_BODY, encode, decode, FrameReader, WireError,
+)
 from .link import dial, listen, Peer, LinkError, type_name, ALPN, DEFAULT_PORT
-from .certs import ensure_cert, spki_pin
+from .certs import ensure_cert, spki_pin, spki_pin_of_cert
 
 __version__ = "0.2.0"
 __all__ = [
-    "Control", "MAX_BODY", "encode", "decode", "FrameReader", "WireError",
+    "Control", "ThreadLinkError", "MAX_BODY", "encode", "decode",
+    "FrameReader", "WireError",
     "dial", "listen", "Peer", "LinkError", "type_name", "ALPN", "DEFAULT_PORT",
-    "ensure_cert", "spki_pin",
+    "ensure_cert", "spki_pin", "spki_pin_of_cert",
 ]

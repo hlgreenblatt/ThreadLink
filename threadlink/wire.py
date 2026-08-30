@@ -64,6 +64,26 @@ class Control(IntEnum):
     ERROR = 0x7F        # Handler failure, reported instead of a dead stream.
 
 
+class ThreadLinkError(IntEnum):
+    """ThreadLink transport error codes, carried in a QUIC CONNECTION_CLOSE or
+    RESET_STREAM. This is a DIFFERENT namespace from Control message types: these
+    are QUIC-level close codes that end a connection or a stream, not type bytes
+    on a frame. Values are small and stable so a registry can grow around them.
+
+    The type byte (Control, above) says 'what kind of message'; a ThreadLinkError
+    says 'why this connection or stream is ending'.
+    """
+
+    NO_ERROR = 0x00          # graceful, no fault (normal close)
+    PROTOCOL_VERSION = 0x01  # no mutually supported ThreadLink/riding version
+    AUTH_REQUIRED = 0x02      # peer presented no certificate; mutual auth mandatory
+    AUTH_FAILED = 0x03        # peer cert present but rejected by verification policy
+    MALFORMED = 0x04          # framing/JSON violated the wire format
+    RESOURCE = 0x05           # limit exceeded (streams, body size, memory)
+    UNSUPPORTED = 0x06        # riding protocol or message type not handled
+    INTERNAL = 0x07           # unexpected local failure; connection state unreliable
+
+
 class WireError(Exception):
     """Malformed frame. Always fatal for the stream it arrived on."""
 

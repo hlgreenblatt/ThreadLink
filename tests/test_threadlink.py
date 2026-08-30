@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from threadlink import (                                    # noqa: E402
-    Control, FrameReader, LinkError, WireError,
+    Control, ThreadLinkError, FrameReader, LinkError, WireError,
     decode, encode, ensure_cert, spki_pin, type_name,
 )
 from threadlink.link import client_config, dial, listen     # noqa: E402
@@ -106,6 +106,7 @@ async def test_live() -> None:
     print("\nlive QUIC round trip")
     with tempfile.TemporaryDirectory() as d:
         cert, key = ensure_cert(d, "srv", ["127.0.0.1"])
+        ccert, ckey = ensure_cert(d, "cli", ["127.0.0.1"])  # client's own identity
 
         async def handle(msg_type, body, peer):
             if msg_type == ECHO:
@@ -120,8 +121,24 @@ async def test_live() -> None:
 
         server = await listen(handle, "127.0.0.1", 4455, certfile=cert, keyfile=key)
 
-        async with await dial("127.0.0.1", 4455, config=client_config()) as peer:
+        # ThreadLink is mutually authenticated: an anonymous client (no cert) MUST
+        # be rejected before it can exchange any message, and the connection MUST
+        # close with the AUTH_REQUIRED transport error code.
+        try:
+            async with await dial("127.0.0.1", 4455,
+                                  config=client_config(), timeout=3) as anon:
+                await anon.request(Control.PING, {})
+            check("anonymous client rejected (mutual auth)", False)
+        except LinkError as exc:
+            check("anonymous client rejected (mutual auth)", True)
+            check("close carries AUTH_REQUIRED code",
+                  str(int(ThreadLinkError.AUTH_REQUIRED)) in str(exc)
+                  or "mutual authentication" in str(exc))
+
+        async with await dial("127.0.0.1", 4455,
+                              config=client_config(certfile=ccert, keyfile=ckey)) as peer:
             check("handshake completed", peer.handshake_ms is not None)
+            check("server learned the client's key id", peer.handshake_ms is not None)
 
             _t, body = await peer.request(ECHO, {"msg": "over QUIC"})
             check("app message round-trips over QUIC",

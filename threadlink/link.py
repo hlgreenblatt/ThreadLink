@@ -56,7 +56,8 @@ from aioquic.quic.events import (
     StreamReset,
 )
 
-from .wire import Control, FrameReader, WireError, encode
+from .certs import spki_pin_of_cert
+from .wire import Control, FrameReader, ThreadLinkError, WireError, encode
 
 log = logging.getLogger("threadlink.link")
 
@@ -153,7 +154,14 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
         self._handshake = asyncio.Event()
         self._t0 = asyncio.get_event_loop().time()
         self.handshake_ms: Optional[float] = None
+        self.peer_key_id: Optional[str] = None   # SPKI pin of the peer's cert
         self._peer = Peer(self)
+        # ThreadLink requires MUTUAL authentication. A listener (server role) must
+        # ask the initiator for a certificate. aioquic only exposes this via the
+        # TLS context, which is built lazily in QuicConnection._initialize(), so we
+        # wrap that to flip the flag the instant the context exists.
+        if not self._quic.configuration.is_client:
+            _enable_client_cert_request(self._quic)
 
     # ---------------------------------------------------------------- helpers
     @property
@@ -237,6 +245,23 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, HandshakeCompleted):
             self.handshake_ms = (asyncio.get_event_loop().time() - self._t0) * 1000.0
+            # ThreadLink mandates MUTUAL authentication. aioquic will REQUEST a
+            # client certificate but does not itself REJECT a client that sends
+            # none, so the listener enforces presence here: no peer certificate ==
+            # not authenticated == close the connection before any riding-protocol
+            # traffic is accepted. (The initiator always sees the listener's cert,
+            # so this check is only meaningful on the server side.)
+            if not self._quic.configuration.is_client:
+                peer_cert = getattr(self._quic.tls, "_peer_certificate", None)
+                if peer_cert is None:
+                    log.warning("%s: peer presented no certificate; mutual auth "
+                                "required, closing", self.peer_address)
+                    self._quic.close(error_code=ThreadLinkError.AUTH_REQUIRED,
+                                     reason_phrase="mutual authentication required")
+                    self.transmit()
+                    self._handshake.set()
+                    return
+                self.peer_key_id = spki_pin_of_cert(peer_cert)
             self._handshake.set()
 
         elif isinstance(event, StreamDataReceived):
@@ -249,7 +274,8 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
                     self._dispatch(event.stream_id, msg_type, body)
             except WireError as exc:
                 log.warning("stream %d: %s", event.stream_id, exc)
-                self._quic.reset_stream(event.stream_id, error_code=1)
+                self._quic.reset_stream(event.stream_id,
+                                        error_code=ThreadLinkError.MALFORMED)
                 self.transmit()
                 self._readers.pop(event.stream_id, None)
 
@@ -311,15 +337,42 @@ def _keylog_file():
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-def client_config(*, verify: bool = False, cafile: Optional[str] = None,
+def _enable_client_cert_request(quic: Any) -> None:
+    """Make a server QuicConnection request the client's certificate.
+
+    aioquic exposes `_request_client_certificate` only on the TLS Context, which
+    is created lazily inside `QuicConnection._initialize(peer_cid)`. We wrap
+    `_initialize` so that, immediately after the real one builds `quic.tls`, the
+    flag is set — turning QUIC's optional client auth into ThreadLink's mandatory
+    mutual authentication. Idempotent; safe if `_initialize` runs more than once.
+    """
+    orig = quic._initialize
+
+    def wrapped(peer_cid: bytes) -> None:
+        orig(peer_cid)
+        tls = getattr(quic, "tls", None)
+        if tls is not None:
+            tls._request_client_certificate = True
+
+    quic._initialize = wrapped
+
+
+def client_config(*, certfile: Optional[str] = None, keyfile: Optional[str] = None,
+                  verify: bool = False, cafile: Optional[str] = None,
                   session_ticket: Any = None) -> QuicConfiguration:
     """QUIC config for dialing out.
 
-    `verify=False` is the default because sprint agents use self-signed certs on
-    a LAN. It is a real trade-off, not an oversight: the connection is still
-    fully encrypted, but an active man-in-the-middle is not prevented. Point
-    `cafile` at a shared CA (or pin the agent's SPKI) before this leaves a
-    trusted network — see docs/SECURITY.md.
+    ThreadLink is mutually authenticated: the client MUST present its own
+    certificate so the listener can prove the initiator holds a private key.
+    `certfile`/`keyfile` are the client's own credential; when omitted the caller
+    is expected to supply one via `dial(..., certfile=...)`, which fills them in.
+
+    `verify=False` (the default) means proof-of-possession WITHOUT binding the
+    peer's key to a trust root — appropriate for self-signed agents on a trusted
+    LAN, where the connection is encrypted and both sides prove key possession,
+    but the *binding* of a key to an identity is a separate deployment policy
+    (trust-on-first-use pin, a CA via `cafile`, or an external/decentralized PKI).
+    Set `verify=True` with `cafile` to validate the peer's certificate to a root.
     """
     cfg = QuicConfiguration(
         is_client=True,
@@ -328,6 +381,8 @@ def client_config(*, verify: bool = False, cafile: Optional[str] = None,
         session_ticket=session_ticket,       # set to enable 0-RTT resumption
         secrets_log_file=_keylog_file(),     # SSLKEYLOGFILE -> Wireshark decrypt
     )
+    if certfile and keyfile:
+        cfg.load_cert_chain(certfile, keyfile)   # the client's OWN cert (mutual auth)
     if verify:
         if cafile:
             cfg.load_verify_locations(cafile=cafile)
@@ -336,8 +391,17 @@ def client_config(*, verify: bool = False, cafile: Optional[str] = None,
     return cfg
 
 
-def server_config(certfile: str, keyfile: str) -> QuicConfiguration:
-    """QUIC config for listening."""
+def server_config(certfile: str, keyfile: str, *,
+                  verify: bool = False, cafile: Optional[str] = None) -> QuicConfiguration:
+    """QUIC config for listening.
+
+    The listener presents its own certificate (mandatory) and — because
+    ThreadLink requires mutual authentication — also requests one from the
+    initiator (see `_enable_client_cert_request`, wired in ThreadLinkProtocol).
+
+    `verify`/`cafile` govern only whether the presented client certificate is
+    validated to a trust root; possession of the key is proven either way.
+    """
     cfg = QuicConfiguration(
         is_client=False,
         alpn_protocols=[ALPN],
@@ -345,6 +409,10 @@ def server_config(certfile: str, keyfile: str) -> QuicConfiguration:
         secrets_log_file=_keylog_file(),     # SSLKEYLOGFILE -> Wireshark decrypt
     )
     cfg.load_cert_chain(certfile, keyfile)
+    if verify and cafile:
+        cfg.load_verify_locations(cafile=cafile)
+    else:
+        cfg.verify_mode = ssl.CERT_NONE      # accept the cert, prove possession only
     return cfg
 
 
@@ -356,14 +424,21 @@ async def dial(
     port: int = DEFAULT_PORT,
     *,
     config: Optional[QuicConfiguration] = None,
+    certfile: Optional[str] = None,
+    keyfile: Optional[str] = None,
     timeout: float = 10.0,
 ):
     """Async context manager yielding a connected `Peer`.
 
-        async with dial("192.168.86.41") as peer:
+        async with dial("192.168.86.41", certfile=c, keyfile=k) as peer:
             await peer.request(Control.PING, {})
+
+    ThreadLink is mutually authenticated, so the initiator presents its own
+    certificate. Pass `certfile`/`keyfile` (or a fully-built `config` that already
+    loaded a client cert chain). Omitting both yields an anonymous client, which a
+    conforming ThreadLink listener will reject at the certificate step.
     """
-    cfg = config or client_config()
+    cfg = config or client_config(certfile=certfile, keyfile=keyfile)
 
     class _Ctx:
         async def __aenter__(self) -> Peer:

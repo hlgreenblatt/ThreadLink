@@ -75,6 +75,20 @@ def ensure_cert(directory: str | Path, agent_id: str,
     return str(certfile), str(keyfile)
 
 
+def spki_pin_of_cert(cert: "x509.Certificate") -> str:
+    """SHA-256 of a loaded certificate's SubjectPublicKeyInfo, base64.
+
+    This is the "Peer Key ID" in the ThreadLink spec: it identifies the key, not
+    a semantic identity, and survives certificate renewal as long as the key is
+    reused. Used at handshake time when we already hold the peer's x509 object.
+    """
+    spki = cert.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return base64.b64encode(hashlib.sha256(spki).digest()).decode()
+
+
 def spki_pin(certfile: str | Path) -> str:
     """SHA-256 of the SubjectPublicKeyInfo, base64 — the peer's stable identity.
 
@@ -83,8 +97,4 @@ def spki_pin(certfile: str | Path) -> str:
     from trust-on-first-use to pinned identity without a CA.
     """
     cert = x509.load_pem_x509_certificate(Path(certfile).read_bytes())
-    spki = cert.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return base64.b64encode(hashlib.sha256(spki).digest()).decode()
+    return spki_pin_of_cert(cert)
