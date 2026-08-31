@@ -25,6 +25,9 @@ log = logging.getLogger("threadchat")
 
 CHAT_VERSION = 1
 
+# ThreadChat's riding-protocol id on ThreadLink (named in each stream's BIND).
+THREADCHAT = "threadchat/1"
+
 
 class ChatMsg(IntEnum):
     """ThreadChat's slice of ThreadLink's opaque type byte."""
@@ -115,18 +118,14 @@ class ChatNode:
                 return Control.ERROR, {"error": "deliver_failed", "detail": str(exc)}
             return ChatMsg.CHAT_ACK, {"msg_id": mid, "by": self.agent_id}
 
-        if msg_type == Control.PING:
-            return Control.PONG, {"agent": self.agent_id}
-
-        if msg_type == Control.BYE:
-            return None
-
+        # PING/PONG/BYE are transport control messages, answered by ThreadLink on
+        # the connection's control stream; they never reach this riding handler.
         return Control.ERROR, {"error": "unhandled", "detail": f"0x{int(msg_type):02X}"}
 
     async def serve(self, host: str, port: int, *, certfile: str, keyfile: str):
         self._certfile, self._keyfile = certfile, keyfile   # reuse when we dial
         log.info("%s chat node listening on udp/%s:%d", self.agent_id, host, port)
-        return await listen(self.handle, host, port,
+        return await listen({THREADCHAT: self.handle}, host, port,
                             certfile=certfile, keyfile=keyfile)
 
     # ----------------------------------------------------------------- client
@@ -146,8 +145,8 @@ class ChatNode:
         if in_reply_to:
             body["in_reply_to"] = in_reply_to
         async with await dial(host, port, **self._client_creds()) as peer:
-            _t, ack = await peer.request(ChatMsg.CHAT_MSG, body)
-            await peer.send(Control.BYE, {"agent": self.agent_id})
+            _t, ack = await peer.request(THREADCHAT, ChatMsg.CHAT_MSG, body)
+            await peer.bye(self.agent_id)
             return {"recipient": recipient, "ack": ack,
                     "handshake_ms": round(peer.handshake_ms or 0, 2)}
 
