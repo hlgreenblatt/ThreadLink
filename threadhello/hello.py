@@ -39,6 +39,10 @@ log = logging.getLogger("threadhello")
 # sides can refuse early and clearly instead of failing on a later frame.
 HELLO_VERSION = 1
 
+# ThreadHello's riding-protocol id on ThreadLink. A stream carrying ThreadHello
+# frames opens with a BIND naming this; the version lets threadhello/2 coexist.
+THREADHELLO = "threadhello/1"
+
 
 class HelloMsg(IntEnum):
     """ThreadHello's message types — this protocol's slice of ThreadLink's
@@ -248,12 +252,9 @@ class HelloAgent:
                                         "assurance": assurance,
                                         "epoch": self.epoch}
 
-        if msg_type == Control.PING:
-            return Control.PONG, {"t": body.get("t"), "agent": self.agent_id}
-
-        if msg_type == Control.BYE:
-            return None                       # close the stream, say nothing
-
+        # PING/PONG/BYE are transport control messages now — ThreadLink answers
+        # them on the connection's control stream, so they never reach this
+        # riding handler. The fallback fires only for unknown ThreadHello types.
         return Control.ERROR, {"error": "unhandled", "detail": f"0x{int(msg_type):02X}"}
 
     def _identity(self) -> dict[str, Any]:
@@ -272,7 +273,7 @@ class HelloAgent:
         # present this same cert when we DIAL a peer, not only when we serve.
         self._certfile, self._keyfile = certfile, keyfile
         log.info("%s listening on udp/%s:%d", self.agent_id, host, port)
-        return await listen(self.handle, host, port,
+        return await listen({THREADHELLO: self.handle}, host, port,
                             certfile=certfile, keyfile=keyfile)
 
     def _client_creds(self) -> dict[str, str]:
@@ -288,24 +289,24 @@ class HelloAgent:
         async with await dial(host, port, **self._client_creds()) as peer:
             hs_ms = peer.handshake_ms
 
-            _t, ack = await peer.request(HelloMsg.HELLO, self._identity())
+            _t, ack = await peer.request(THREADHELLO, HelloMsg.HELLO, self._identity())
             remote = str(ack.get("agent", f"{host}:{port}"))
             if ack.get("error"):
                 raise RuntimeError(f"{remote}: {ack.get('detail')}")
 
             # Pull what they learned since we last spoke.
             since = self._last_sync.get(remote, 0.0)
-            _t, table = await peer.request(HelloMsg.ROUTE_REQ,
+            _t, table = await peer.request(THREADHELLO, HelloMsg.ROUTE_REQ,
                                            {"since": since, "limit": 500})
             pulled = self.store.merge(table.get("rows") or [],
                                       known_paths=self.known_paths)
 
             # Push ours in the same visit, so one meeting syncs both directions.
             mine = self.store.export(since=0.0, limit=500)
-            _t, res = await peer.request(HelloMsg.ROUTE_TABLE,
+            _t, res = await peer.request(THREADHELLO, HelloMsg.ROUTE_TABLE,
                                          {"rows": mine, "agent": self.agent_id})
 
-            await peer.send(Control.BYE, {"agent": self.agent_id})
+            await peer.bye(self.agent_id)
             self._last_sync[remote] = time.time()
 
             return {
@@ -333,30 +334,30 @@ class HelloAgent:
         cls = classify_model(local=local, free=free,
                              assurance=assurance, basis=basis)
         async with await dial(host, port, **self._client_creds()) as peer:
-            _t, ack = await peer.request(HelloMsg.MODEL_UPDATE, {
+            _t, ack = await peer.request(THREADHELLO, HelloMsg.MODEL_UPDATE, {
                 "agent": self.agent_id, "action": action,
                 "model": model, "path": path,
                 "model_class": f"{cls['locality']}/{cls['cost']}",
                 "locality": cls["locality"], "cost": cls["cost"],
                 "assurance": cls["assurance"], "basis": cls["basis"]})
-            await peer.send(Control.BYE, {"agent": self.agent_id})
+            await peer.bye(self.agent_id)
             return ack
 
     async def withdraw_route(self, host, port, *, path):
         """Tell a peer a path is down — stop routing to it (route-down)."""
         async with await dial(host, port, **self._client_creds()) as peer:
-            _t, ack = await peer.request(HelloMsg.ROUTE_WITHDRAW, {
+            _t, ack = await peer.request(THREADHELLO, HelloMsg.ROUTE_WITHDRAW, {
                 "agent": self.agent_id, "path": path})
-            await peer.send(Control.BYE, {"agent": self.agent_id})
+            await peer.bye(self.agent_id)
             return ack
 
     async def push_update(self, host, port, *, since=0.0):
         """Push a delta of what changed since `since` (incremental, not full table)."""
         rows = self.store.export(since=since, limit=500)
         async with await dial(host, port, **self._client_creds()) as peer:
-            _t, ack = await peer.request(HelloMsg.ROUTE_UPDATE, {
+            _t, ack = await peer.request(THREADHELLO, HelloMsg.ROUTE_UPDATE, {
                 "agent": self.agent_id, "rows": rows})
-            await peer.send(Control.BYE, {"agent": self.agent_id})
+            await peer.bye(self.agent_id)
             return {"pushed": len(rows), "ack": ack}
 
     async def gossip(self, peers: list[tuple[str, int]]) -> list[dict[str, Any]]:

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from threadlink import Control, ensure_cert, spki_pin                # noqa: E402
 from threadlink.link import client_config, dial                      # noqa: E402
 from threadhello import (                                            # noqa: E402
-    HelloAgent, HelloMsg, Observation, RouteStore, cell_key, fp_of_cell,
+    HelloAgent, HelloMsg, Observation, RouteStore, cell_key, fp_of_cell, THREADHELLO,
 )
 from threadhello.routeshare import DEFAULT_TRUST, MAX_WEIGHT         # noqa: E402
 
@@ -148,18 +148,19 @@ async def test_live() -> None:
         # (client_config carries the client's own cert for mutual auth)
         async with await dial("127.0.0.1", 4456,
                               config=client_config(certfile=ccert, keyfile=ckey)) as peer:
-            _t, ack = await peer.request(HelloMsg.HELLO, {"agent": "old", "proto": 99})
+            _t, ack = await peer.request(THREADHELLO, HelloMsg.HELLO,
+                                         {"agent": "old", "proto": 99})
             check("version mismatch refused", ack.get("error") == "protocol_mismatch")
 
-            # PING answered via ThreadLink's generic control types.
-            _t, pong = await peer.request(Control.PING, {"t": 7})
-            check("PING answered with PONG",
-                  _t == Control.PONG and pong.get("t") == 7)
+            # PING is a transport control message now — answered on the control
+            # stream, not by the ThreadHello handler.
+            pong = await peer.ping()
+            check("PING answered with PONG", "id" in pong)
 
             # The route exchange must survive a mid-session migration.
             before = peer.peer_connection_id
             after = peer.migrate()
-            _t, tbl = await peer.request(HelloMsg.ROUTE_REQ, {"since": 0})
+            _t, tbl = await peer.request(THREADHELLO, HelloMsg.ROUTE_REQ, {"since": 0})
             check("route pull survives connection migration",
                   before != after and len(tbl.get("rows") or []) == 1)
 

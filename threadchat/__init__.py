@@ -21,6 +21,7 @@ from .chat import (
     ChatMsg,
     ChatNode,
     CHAT_VERSION,
+    THREADCHAT,
 )
 
-__all__ = ["ChatMsg", "ChatNode", "CHAT_VERSION"]
+__all__ = ["THREADCHAT", "ChatMsg", "ChatNode", "CHAT_VERSION"]
