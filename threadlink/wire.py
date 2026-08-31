@@ -52,16 +52,19 @@ MAX_BODY = 4 * 1024 * 1024         # 4 MiB
 class Control(IntEnum):
     """The few message types the TRANSPORT itself owns.
 
-    Everything else in the 0x00-0xFF type space belongs to whatever protocol
-    rides on ThreadLink — the transport carries the byte, it does not interpret
-    it. (ThreadHello, for example, claims 0x01-0x04 for its handshake and route
-    exchange, and ThreadLink neither knows nor cares.)
+    BIND (0x00) and the control types (0x05-0x07, 0x7F) are transport-owned. Every
+    other type value belongs to whatever protocol rides on ThreadLink — the
+    transport carries the byte, it does not interpret it. A stream's riding
+    protocol is named by its opening BIND frame, so two riding protocols may reuse
+    the same type value without collision; ThreadLink knows which protocol owns a
+    stream, never what its messages mean.
     """
 
-    PING = 0x05         # Liveness / latency probe.
-    PONG = 0x06
-    BYE = 0x07          # Graceful goodbye; peer may drop state.
-    ERROR = 0x7F        # Handler failure, reported instead of a dead stream.
+    BIND = 0x00         # First frame on a DATA stream: names the riding protocol.
+    PING = 0x05         # Liveness / latency probe (control stream).
+    PONG = 0x06         # Reply to PING (control stream).
+    BYE = 0x07          # Graceful goodbye; peer may drop state (control stream).
+    ERROR = 0x7F        # Handler/transport failure reported as a frame.
 
 
 class ThreadLinkError(IntEnum):
@@ -88,27 +91,49 @@ class WireError(Exception):
     """Malformed frame. Always fatal for the stream it arrived on."""
 
 
-def encode(msg_type: int, body: dict[str, Any], flags: int = 0) -> bytes:
-    """Serialize one message to a single frame.
+def encode_raw(msg_type: int, payload: bytes, flags: int = 0) -> bytes:
+    """Serialize one frame from an ALREADY-ENCODED body (opaque octets).
 
-    `msg_type` is any application-chosen value 0x00-0xFF (IntEnum members
-    work as-is). The transport does not interpret it.
+    The transport uses this for riding-protocol frames: the riding protocol
+    supplies the bytes (via its own codec) and ThreadLink never looks inside
+    them. `encode` (JSON) is the convenience wrapper for the transport's OWN
+    control frames and for the default riding codec.
     """
     if not 0 <= int(msg_type) <= 0xFF:
         raise WireError(f"message type {msg_type!r} does not fit one byte")
-    payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(payload) > MAX_BODY:
         raise WireError(f"body {len(payload)}B exceeds MAX_BODY {MAX_BODY}B")
     return HEADER.pack(MAGIC, int(msg_type), flags, len(payload)) + payload
 
 
-def decode(frame: bytes) -> tuple[int, dict[str, Any]]:
-    """Parse exactly one complete frame. Use FrameReader for stream input.
+def encode(msg_type: int, body: dict[str, Any], flags: int = 0) -> bytes:
+    """Serialize one message to a single frame, JSON-encoding the body.
 
-    The type byte is returned as a plain int; dispatching it against a
-    protocol's own enum is the application's job (IntEnum == int compares
-    fine). An unknown type is NOT a wire error — an old peer must be able to
-    answer "unhandled" instead of tearing the stream down.
+    `msg_type` is any application-chosen value 0x00-0xFF (IntEnum members
+    work as-is). The transport does not interpret it.
+    """
+    payload = json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return encode_raw(msg_type, payload, flags)
+
+
+def json_body(payload: bytes) -> dict[str, Any]:
+    """Decode a frame body as a JSON object. The default riding codec, and the
+    codec for every transport control frame (BIND/PING/PONG/BYE/ERROR)."""
+    try:
+        body = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WireError(f"undecodable body: {exc}") from exc
+    if not isinstance(body, dict):
+        raise WireError("body must be a JSON object")
+    return body
+
+
+def decode_raw(frame: bytes) -> tuple[int, bytes]:
+    """Parse one complete frame, returning the body as OPAQUE octets.
+
+    The transport uses this so it never has to understand a riding protocol's
+    serialization. Apply a codec (json_body, or the riding protocol's own) to
+    the returned bytes at the handler boundary.
     """
     if len(frame) < HEADER_LEN:
         raise WireError("frame shorter than header")
@@ -117,13 +142,19 @@ def decode(frame: bytes) -> tuple[int, dict[str, Any]]:
         raise WireError(f"bad magic {magic!r} — not a ThreadLink stream")
     if len(frame) != HEADER_LEN + length:
         raise WireError("frame length does not match header")
-    try:
-        body = json.loads(frame[HEADER_LEN:].decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise WireError(f"undecodable body: {exc}") from exc
-    if not isinstance(body, dict):
-        raise WireError("body must be a JSON object")
-    return typ, body
+    return typ, frame[HEADER_LEN:]
+
+
+def decode(frame: bytes) -> tuple[int, dict[str, Any]]:
+    """Parse exactly one complete frame, JSON-decoding the body.
+
+    The type byte is returned as a plain int; dispatching it against a
+    protocol's own enum is the application's job (IntEnum == int compares
+    fine). An unknown type is NOT a wire error — an old peer must be able to
+    answer "unhandled" instead of tearing the stream down.
+    """
+    typ, payload = decode_raw(frame)
+    return typ, json_body(payload)
 
 
 class FrameReader:
@@ -134,12 +165,16 @@ class FrameReader:
     interleaved messages will be spliced into nonsense.
     """
 
-    __slots__ = ("_buf",)
+    __slots__ = ("_buf", "_raw")
 
-    def __init__(self) -> None:
+    def __init__(self, raw: bool = False) -> None:
+        # raw=True yields (type, opaque_bytes) so the caller applies the riding
+        # protocol's codec; raw=False (default) JSON-decodes, so existing callers
+        # and tests that expect dict bodies are unchanged.
         self._buf = bytearray()
+        self._raw = raw
 
-    def feed(self, data: bytes) -> Iterator[tuple[int, dict[str, Any]]]:
+    def feed(self, data: bytes) -> Iterator[tuple[int, Any]]:
         self._buf.extend(data)
         while True:
             if len(self._buf) < HEADER_LEN:
@@ -154,7 +189,7 @@ class FrameReader:
                 return                      # partial message; wait for more
             frame = bytes(self._buf[:total])
             del self._buf[:total]
-            yield decode(frame)
+            yield decode_raw(frame) if self._raw else decode(frame)
 
     @property
     def pending(self) -> int:

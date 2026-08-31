@@ -108,73 +108,120 @@ async def test_live() -> None:
         cert, key = ensure_cert(d, "srv", ["127.0.0.1"])
         ccert, ckey = ensure_cert(d, "cli", ["127.0.0.1"])  # client's own identity
 
+        PROTO = "test/1"
+
         async def handle(msg_type, body, peer):
             if msg_type == ECHO:
                 return ECHO, {"echo": body}
-            if msg_type == Control.PING:
-                return Control.PONG, {"t": body.get("t")}
             if msg_type == BOOM:
                 raise RuntimeError("handler exploded on purpose")
-            if msg_type == Control.BYE:
-                return None
             return Control.ERROR, {"error": "unhandled", "detail": type_name(msg_type)}
 
-        server = await listen(handle, "127.0.0.1", 4455, certfile=cert, keyfile=key)
+        server = await listen({PROTO: handle}, "127.0.0.1", 4455,
+                              certfile=cert, keyfile=key)
 
         # ThreadLink is mutually authenticated: an anonymous client (no cert) MUST
-        # be rejected before it can exchange any message, and the connection MUST
-        # close with the AUTH_REQUIRED transport error code.
+        # be rejected before it can exchange any message. The listener aborts the
+        # handshake with a native TLS certificate_required alert.
         try:
             async with await dial("127.0.0.1", 4455,
                                   config=client_config(), timeout=3) as anon:
-                await anon.request(Control.PING, {})
+                await anon.ping()
             check("anonymous client rejected (mutual auth)", False)
         except LinkError as exc:
             check("anonymous client rejected (mutual auth)", True)
-            check("close carries AUTH_REQUIRED code",
-                  str(int(ThreadLinkError.AUTH_REQUIRED)) in str(exc)
-                  or "mutual authentication" in str(exc))
+            check("close reason names mutual authentication",
+                  "mutual authentication" in str(exc))
 
         async with await dial("127.0.0.1", 4455,
                               config=client_config(certfile=ccert, keyfile=ckey)) as peer:
             check("handshake completed", peer.handshake_ms is not None)
-            check("server learned the client's key id", peer.handshake_ms is not None)
 
-            _t, body = await peer.request(ECHO, {"msg": "over QUIC"})
+            _t, body = await peer.request(PROTO, ECHO, {"msg": "over QUIC"})
             check("app message round-trips over QUIC",
                   _t == ECHO and body["echo"]["msg"] == "over QUIC")
 
             # A handler exception must come back as ERROR, not kill the link.
-            _t, err = await peer.request(BOOM, {})
+            _t, err = await peer.request(PROTO, BOOM, {})
             check("handler exception reported as ERROR frame",
                   _t == Control.ERROR and err.get("error") == "RuntimeError")
-            _t, again = await peer.request(ECHO, {"msg": "still alive"})
+            _t, again = await peer.request(PROTO, ECHO, {"msg": "still alive"})
             check("connection survives a handler crash",
                   again["echo"]["msg"] == "still alive")
 
             # A type the server never heard of gets a clean refusal.
-            _t, unk = await peer.request(0x66, {})
+            _t, unk = await peer.request(PROTO, 0x66, {})
             check("unknown type answered, not hung",
                   _t == Control.ERROR and unk.get("error") == "unhandled")
 
-            # Concurrency: 12 exchanges in flight on one connection.
+            # Liveness on the control stream: many PINGs correlate by id.
+            pongs = await asyncio.gather(*[peer.ping() for _ in range(12)])
+            check("12 control-stream pings all answered",
+                  len(pongs) == 12 and all("id" in p for p in pongs))
+            check("ping ids are distinct",
+                  len({p["id"] for p in pongs}) == 12)
+
+            # Concurrency on data streams: 12 exchanges in flight at once.
             out = await asyncio.gather(*[
-                peer.request(Control.PING, {"t": i}) for i in range(12)
+                peer.request(PROTO, ECHO, {"n": i}) for i in range(12)
             ])
-            check("12 concurrent streams all answered",
-                  len(out) == 12 and all(m == Control.PONG for m, _ in out))
+            check("12 concurrent data streams all answered",
+                  len(out) == 12 and all(m == ECHO for m, _ in out))
             check("replies matched to their own streams",
-                  sorted(b["t"] for _, b in out) == list(range(12)))
+                  sorted(b["echo"]["n"] for _, b in out) == list(range(12)))
 
             before = peer.peer_connection_id
             after = peer.migrate()
-            _t, post = await peer.request(ECHO, {"msg": "after the move"})
+            _t, post = await peer.request(PROTO, ECHO, {"msg": "after the move"})
             check("connection id rotated", before != after and len(after) > 0)
             check("session survived migration",
                   post["echo"]["msg"] == "after the move")
 
-            await peer.send(Control.BYE, {})   # one-way; nothing to await
+            await peer.bye("cli")   # control stream; nothing to await
 
+        server.close()
+
+    # A stream that BINDs to an unregistered riding protocol is refused.
+    with tempfile.TemporaryDirectory() as d:
+        cert, key = ensure_cert(d, "srv", ["127.0.0.1"])
+        ccert, ckey = ensure_cert(d, "cli", ["127.0.0.1"])
+
+        async def echo(msg_type, body, peer):
+            return msg_type, body
+
+        server = await listen({"known/1": echo}, "127.0.0.1", 4457,
+                              certfile=cert, keyfile=key)
+        async with await dial("127.0.0.1", 4457,
+                              config=client_config(certfile=ccert, keyfile=ckey)) as peer:
+            try:
+                await peer.request("unknown/9", 0x20, {}, timeout=3)
+                check("unknown riding protocol refused", False)
+            except LinkError:
+                check("unknown riding protocol refused", True)
+            # the connection still works for a known protocol afterward
+            _t, b = await peer.request("known/1", 0x20, {"ok": 1})
+            check("connection survives an unknown-proto refusal", b.get("ok") == 1)
+        server.close()
+
+    # One listener hosting TWO riding protocols; streams self-sort by BIND.
+    with tempfile.TemporaryDirectory() as d:
+        cert, key = ensure_cert(d, "srv", ["127.0.0.1"])
+        ccert, ckey = ensure_cert(d, "cli", ["127.0.0.1"])
+
+        async def alpha(mt, body, peer):
+            return mt, {"who": "alpha", **body}
+
+        async def beta(mt, body, peer):
+            return mt, {"who": "beta", **body}
+
+        server = await listen({"alpha/1": alpha, "beta/1": beta},
+                              "127.0.0.1", 4458, certfile=cert, keyfile=key)
+        async with await dial("127.0.0.1", 4458,
+                              config=client_config(certfile=ccert, keyfile=ckey)) as peer:
+            _t, a = await peer.request("alpha/1", 0x30, {"x": 1})
+            _t, b = await peer.request("beta/1", 0x30, {"x": 2})
+            check("stream bound to alpha routed to alpha handler", a.get("who") == "alpha")
+            check("stream bound to beta routed to beta handler", b.get("who") == "beta")
         server.close()
 
     # A dial to a dead port must fail with LinkError, not hang forever.
