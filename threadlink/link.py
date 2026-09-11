@@ -49,6 +49,7 @@ from typing import Any, Awaitable, Callable, Optional
 from aioquic.asyncio import connect, serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.tls import CipherSuite
 from aioquic.quic.events import (
     ConnectionTerminated,
     HandshakeCompleted,
@@ -552,6 +553,15 @@ def _enable_client_cert_request(quic: Any) -> None:
     quic._initialize = wrapped
 
 
+# Captain's order 2026-09-11: ChaCha20-Poly1305 FIRST, AES-GCM as the negotiated fallback.
+# TLS 1.3 picks the first suite both sides offer, so a ThreadLink peer talking to an
+# AES-only stack still connects; two ThreadLinks talk ChaCha20.
+CIPHER_SUITES = [
+    CipherSuite.CHACHA20_POLY1305_SHA256,
+    CipherSuite.AES_256_GCM_SHA384,
+    CipherSuite.AES_128_GCM_SHA256,
+]
+
 def client_config(*, certfile: Optional[str] = None, keyfile: Optional[str] = None,
                   verify: bool = False, cafile: Optional[str] = None,
                   session_ticket: Any = None) -> QuicConfiguration:
@@ -571,6 +581,7 @@ def client_config(*, certfile: Optional[str] = None, keyfile: Optional[str] = No
     """
     cfg = QuicConfiguration(
         is_client=True,
+        cipher_suites=CIPHER_SUITES,
         alpn_protocols=[ALPN],
         idle_timeout=30.0,
         session_ticket=session_ticket,       # set to enable 0-RTT resumption
@@ -599,6 +610,7 @@ def server_config(certfile: str, keyfile: str, *,
     """
     cfg = QuicConfiguration(
         is_client=False,
+        cipher_suites=CIPHER_SUITES,
         alpn_protocols=[ALPN],
         idle_timeout=30.0,
         secrets_log_file=_keylog_file(),     # SSLKEYLOGFILE -> Wireshark decrypt

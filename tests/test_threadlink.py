@@ -242,6 +242,7 @@ def main() -> int:
     print("═" * 60)
     test_wire()
     test_certs()
+    test_cipher_order()
     asyncio.run(test_live())
     print("\n" + "═" * 60)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
@@ -250,6 +251,31 @@ def main() -> int:
             print(f"  FAILED: {f}")
     print("═" * 60)
     return 1 if FAIL else 0
+
+
+def test_cipher_order() -> None:
+    """Captain's order 2026-09-11: ChaCha20-Poly1305 must lead the handshake; AES-GCM is the fallback."""
+    from threadlink.link import CIPHER_SUITES
+    from aioquic.tls import CipherSuite
+    check("ChaCha20 offered first",
+          CIPHER_SUITES[0] is CipherSuite.CHACHA20_POLY1305_SHA256,
+          str([c.name for c in CIPHER_SUITES]))
+    check("AES-GCM kept as fallback",
+          CipherSuite.AES_256_GCM_SHA384 in CIPHER_SUITES and CipherSuite.AES_128_GCM_SHA256 in CIPHER_SUITES)
+
+    async def run() -> str:
+        tmp = Path(tempfile.mkdtemp())
+        scert, skey = ensure_cert(tmp, "srv"); ccert, ckey = ensure_cert(tmp, "cli")
+        async def echo(req): return req
+        server = await listen({"probe/1": echo}, "127.0.0.1", 47333, certfile=scert, keyfile=skey)
+        try:
+            async with await dial("127.0.0.1", 47333, certfile=ccert, keyfile=ckey) as peer:
+                await peer.ping()
+                return peer._proto._quic.tls.key_schedule.cipher_suite.name
+        finally:
+            server.close()
+    negotiated = asyncio.run(run())
+    check("live handshake negotiated ChaCha20-Poly1305", negotiated == "CHACHA20_POLY1305_SHA256", negotiated)
 
 
 if __name__ == "__main__":
