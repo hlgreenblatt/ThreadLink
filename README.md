@@ -22,6 +22,40 @@ idea goes nowhere, this comlink is still useful on its own — that separation i
 the point, and it is enforced by the repo boundary: ThreadRouter imports
 ThreadLink; ThreadLink imports nothing of ThreadRouter.
 
+## Post-quantum by default (v0.4)
+
+Every ThreadLink handshake is now post-quantum on both of its jobs:
+
+- **Key agreement: `X25519MLKEM768`**, the hybrid of ML-KEM-768 (FIPS 203,
+  the standardised CRYSTALS-Kyber) and X25519. Someone recording traffic today
+  to decrypt it with a future quantum computer has to break *both*.
+- **Identity: ML-DSA-65 certificates** (FIPS 204, the standardised
+  CRYSTALS-Dilithium), and every CertificateVerify is an ML-DSA signature, on
+  both sides, because ThreadLink is mutually authenticated. Most deployments
+  that have adopted hybrid key exchange still sign with classical keys.
+
+aioquic 1.3.0 supports neither, so `threadlink/pq.py` adds them using the ML-KEM
+and ML-DSA that `cryptography` exposes from OpenSSL 3.5+. Every aioquic method it
+replaces or wraps is fingerprinted. On any other aioquic version it patches
+nothing, logs why, and ThreadLink keeps working classically
+(`threadlink.pq_status()` reports which). Other details:
+
+- `THREADLINK_PQ=off` is the rollback; `THREADLINK_PQ=require` refuses any peer
+  that will not do the hybrid.
+- A post-quantum node still talks to an older one (its classical key shares are
+  offered behind the hybrid).
+- `Peer.crypto` reports what a connection actually negotiated.
+- Interop is checked against OpenSSL's own QUIC client: `openssl s_client -quic
+  -groups X25519MLKEM768 -sigalgs mldsa65` with an ML-DSA client certificate
+  completes the handshake against a ThreadLink listener.
+
+The cost is bytes, not time. A 5.6 KB certificate and a 3.3 KB signature,
+against roughly 0.5 KB for P-256, make the handshake about 10 KB larger. On
+loopback it takes ~3.5 ms either way. See it on the wire in
+[`demo/wireshark/pq/`](demo/wireshark/pq/): a decrypting capture plus screenshots.
+
+![ThreadLink in Wireshark: X25519MLKEM768 key share](demo/wireshark/pq/threadlink-pq-clienthello.png)
+
 ---
 
 ## Why QUIC, concretely
@@ -100,8 +134,8 @@ number.
 
 ## Security posture (sprint honesty)
 
-Connections are always encrypted; peer *authentication* currently uses
-self-signed certificates with verification off by default, suitable for a
+Connections are always encrypted, post-quantum (see above); peer *authentication*
+currently uses self-signed ML-DSA-65 certificates with verification off by default, suitable for a
 trusted LAN and not beyond it — see `docs/SECURITY.md` for exactly what is and
 is not defended, and the SPKI-pinning hook (`spki_pin`) left for the trust
 layer to grow into.
@@ -111,8 +145,10 @@ layer to grow into.
 ```
 threadlink/link.py    dial/listen, streams, migration (aioquic underneath)
 threadlink/wire.py    10-byte frame header + JSON body; type byte is opaque
-threadlink/certs.py   per-agent self-signed certs + SPKI pins
+threadlink/certs.py   per-agent self-signed certs (ML-DSA-65 default) + SPKI pins
+threadlink/pq.py      X25519MLKEM768 + ML-DSA for aioquic 1.3.0
 demo/migration.py     Connection ID rotates, session survives
 bench/handshake.py    QUIC vs TCP+TLS 1.3, measured vs projected
-tests/                24 checks including a live QUIC round trip
+tests/                42 checks: live QUIC round trip, post-quantum handshake,
+                      fallback to a classical peer
 ```

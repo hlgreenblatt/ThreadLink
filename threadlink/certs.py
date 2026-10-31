@@ -21,26 +21,44 @@ from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, mldsa
 from cryptography.x509.oid import NameOID
 
 VALID_DAYS = 365
 
 
+# Captain's order 2026-10-31: agent identities are CRYSTALS-Dilithium (ML-DSA, FIPS 204).
+# ML-DSA-65 = NIST category 3, the same strength class as the ML-KEM-768 key agreement.
+# "p-256" stays available for a peer that cannot verify ML-DSA yet.
+CERT_ALGORITHMS = {
+    "ml-dsa-44": mldsa.MLDSA44PrivateKey,
+    "ml-dsa-65": mldsa.MLDSA65PrivateKey,
+    "ml-dsa-87": mldsa.MLDSA87PrivateKey,
+    "p-256": None,
+}
+DEFAULT_CERT_ALGORITHM = "ml-dsa-65"
+
+
 def ensure_cert(directory: str | Path, agent_id: str,
-                hosts: list[str] | None = None) -> tuple[str, str]:
+                hosts: list[str] | None = None,
+                algorithm: str = DEFAULT_CERT_ALGORITHM) -> tuple[str, str]:
     """Return (certfile, keyfile) for `agent_id`, generating them if absent.
 
-    P-256 rather than RSA: much smaller certificates, and the certificate is
-    sent inside the handshake — on a 1-RTT budget the bytes are the point.
+    ML-DSA-65 (Dilithium) by default: a post-quantum signature in the certificate
+    and in every CertificateVerify. The price is size - a 5.4 KB certificate and a
+    3.3 KB signature against ~0.5 KB for P-256 - sent once per handshake.
+    An existing pair on disk is returned as is, whatever its algorithm.
     """
+    if algorithm not in CERT_ALGORITHMS:
+        raise ValueError(f"algorithm must be one of {sorted(CERT_ALGORITHMS)}")
     d = Path(directory).expanduser()
     d.mkdir(parents=True, exist_ok=True)
     certfile, keyfile = d / f"{agent_id}.crt", d / f"{agent_id}.key"
     if certfile.exists() and keyfile.exists():
         return str(certfile), str(keyfile)
 
-    key = ec.generate_private_key(ec.SECP256R1())
+    key_cls = CERT_ALGORITHMS[algorithm]
+    key = key_cls.generate() if key_cls else ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, agent_id)])
 
     alt: list[x509.GeneralName] = [x509.DNSName("localhost"), x509.DNSName(agent_id)]
@@ -62,7 +80,7 @@ def ensure_cert(directory: str | Path, agent_id: str,
         .not_valid_after(now + dt.timedelta(days=VALID_DAYS))
         .add_extension(x509.SubjectAlternativeName(alt), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
+        .sign(key, hashes.SHA256() if key_cls is None else None)   # ML-DSA hashes internally
     )
 
     certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))

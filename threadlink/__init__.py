@@ -11,11 +11,12 @@ from .wire import (
 )
 from .link import dial, listen, Peer, LinkError, type_name, ALPN, DEFAULT_PORT
 from .certs import ensure_cert, spki_pin, spki_pin_of_cert
+from .pq import status as pq_status
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 __all__ = [
     "Control", "ThreadLinkError", "MAX_BODY", "encode", "decode",
     "FrameReader", "WireError",
     "dial", "listen", "Peer", "LinkError", "type_name", "ALPN", "DEFAULT_PORT",
-    "ensure_cert", "spki_pin", "spki_pin_of_cert",
+    "ensure_cert", "spki_pin", "spki_pin_of_cert", "pq_status",
 ]

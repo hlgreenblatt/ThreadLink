@@ -243,6 +243,7 @@ def main() -> int:
     test_wire()
     test_certs()
     test_cipher_order()
+    test_post_quantum()
     asyncio.run(test_live())
     print("\n" + "═" * 60)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
@@ -276,6 +277,72 @@ def test_cipher_order() -> None:
             server.close()
     negotiated = asyncio.run(run())
     check("live handshake negotiated ChaCha20-Poly1305", negotiated == "CHACHA20_POLY1305_SHA256", negotiated)
+
+
+
+_CLASSICAL_SERVER = r"""
+import asyncio, sys
+sys.path.insert(0, sys.argv[1])
+from threadlink import ensure_cert
+from threadlink.link import listen, PQ_STATUS
+assert not PQ_STATUS["post_quantum"]
+async def main():
+    c = ensure_cert(sys.argv[2], "old", algorithm="p-256")
+    async def echo(t, b, p): return (t, b)
+    await listen({"probe/1": echo}, "127.0.0.1", int(sys.argv[3]), certfile=c[0], keyfile=c[1])
+    print("ready", flush=True)
+    await asyncio.sleep(15)
+asyncio.run(main())
+"""
+
+
+def test_post_quantum() -> None:
+    """Captain's order 2026-10-31: X25519MLKEM768 key agreement + ML-DSA (Dilithium) identities."""
+    import os
+    import subprocess
+    from threadlink.link import PQ_STATUS
+    print("\npost-quantum")
+    check("PQ patch installed on this aioquic", PQ_STATUS["post_quantum"], PQ_STATUS["reason"])
+
+    async def pq_pair() -> tuple[dict, dict]:
+        tmp = Path(tempfile.mkdtemp())
+        s = ensure_cert(tmp, "srv"); c = ensure_cert(tmp, "cli")
+        seen: dict = {}
+        async def echo(t, b, peer):
+            seen.update(peer.crypto); return (t, b)
+        server = await listen({"probe/1": echo}, "127.0.0.1", 47334, certfile=s[0], keyfile=s[1])
+        try:
+            async with await dial("127.0.0.1", 47334, certfile=c[0], keyfile=c[1]) as peer:
+                await peer.request("probe/1", ECHO, {"x": 1})
+                return peer.crypto, seen
+        finally:
+            server.close()
+    client, server = asyncio.run(pq_pair())
+    check("default certificate is ML-DSA-65",
+          "ML-DSA-65" in str(__import__("cryptography.x509", fromlist=["x"]).load_pem_x509_certificate(
+              Path(ensure_cert(tempfile.mkdtemp(), "x")[0]).read_bytes()).signature_algorithm_oid))
+    check("key exchange is X25519MLKEM768 (client view)", client.get("key_exchange") == "X25519MLKEM768", str(client))
+    check("key exchange is X25519MLKEM768 (server view)", server.get("key_exchange") == "X25519MLKEM768", str(server))
+    check("server proved identity with ML-DSA-65", client.get("peer_signature") == "mldsa65", str(client))
+    check("client proved identity with ML-DSA-65", server.get("peer_signature") == "mldsa65", str(server))
+
+    # A PQ node must still reach a node that has not been upgraded (classical TLS, P-256 cert).
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, THREADLINK_PQ="off")
+    proc = subprocess.Popen([sys.executable, "-c", _CLASSICAL_SERVER, str(Path(__file__).resolve().parent.parent),
+                             tmp, "47335"], env=env, stdout=subprocess.PIPE, text=True)
+    try:
+        proc.stdout.readline()
+        async def to_old() -> dict:
+            c = ensure_cert(tempfile.mkdtemp(), "new", algorithm="p-256")
+            async with await dial("127.0.0.1", 47335, certfile=c[0], keyfile=c[1]) as peer:
+                await peer.request("probe/1", ECHO, {"x": 1})
+                return peer.crypto
+        old = asyncio.run(to_old())
+        check("PQ node still talks to a classical node (falls back)",
+              old.get("key_exchange") not in (None, "X25519MLKEM768"), str(old))
+    finally:
+        proc.kill()
 
 
 if __name__ == "__main__":

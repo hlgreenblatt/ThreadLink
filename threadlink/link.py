@@ -58,6 +58,7 @@ from aioquic.quic.events import (
     StreamReset,
 )
 
+from . import pq
 from .certs import spki_pin_of_cert
 from .wire import (
     Control, FrameReader, ThreadLinkError, WireError,
@@ -65,6 +66,10 @@ from .wire import (
 )
 
 log = logging.getLogger("threadlink.link")
+
+# Post-quantum handshake (X25519MLKEM768 + ML-DSA) - see pq.py. Installed at import so
+# every dial/listen in this process uses it; THREADLINK_PQ=off is the rollback switch.
+PQ_STATUS = pq.install()
 
 # ALPN identifies the application protocol inside the TLS handshake, so a
 # ThreadLink peer and (say) an HTTP/3 peer refuse each other during the
@@ -158,6 +163,13 @@ class Peer:
         return self._proto.handshake_ms
 
     @property
+    def crypto(self) -> dict[str, Any]:
+        """What this connection's handshake actually negotiated: key exchange group
+        (X25519MLKEM768 when both ends are post-quantum), cipher, and the signature
+        algorithm each side proved its identity with (mldsa65 = Dilithium)."""
+        return self._proto.crypto
+
+    @property
     def connection_id(self) -> bytes:
         """Our own Connection ID."""
         return self._proto.connection_id
@@ -192,6 +204,7 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
         self._t0 = asyncio.get_event_loop().time()
         self.handshake_ms: Optional[float] = None
         self.peer_key_id: Optional[str] = None    # SPKI pin of the peer's cert
+        self.crypto: dict[str, Any] = {}          # what the handshake used (pq.describe)
         self._close_reason: Optional[str] = None  # why the connection ended
         # control stream (PING/PONG/BYE/ERROR): opened by the client post-handshake
         self._control_stream_id: Optional[int] = None
@@ -364,6 +377,11 @@ class ThreadLinkProtocol(QuicConnectionProtocol):
                 peer_cert = getattr(self._quic.tls, "_peer_certificate", None)
                 if peer_cert is not None:
                     self.peer_key_id = spki_pin_of_cert(peer_cert)
+            self.crypto = pq.describe(getattr(self._quic, "tls", None))
+            log.info("handshake %s: kex=%s cipher=%s sig ours=%s peer=%s",
+                     "server" if not self._quic.configuration.is_client else "client",
+                     self.crypto.get("key_exchange"), self.crypto.get("cipher"),
+                     self.crypto.get("our_signature"), self.crypto.get("peer_signature"))
             self._handshake.set()
 
         elif isinstance(event, StreamDataReceived):
