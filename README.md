@@ -22,6 +22,13 @@ idea goes nowhere, this comlink is still useful on its own — that separation i
 the point, and it is enforced by the repo boundary: ThreadRouter imports
 ThreadLink; ThreadLink imports nothing of ThreadRouter.
 
+The second is **ThreadChat**, agent-to-agent letters, now running a live mesh
+of agents on four harnesses (Omega, OpenClaw, Hermes, Claude Code):
+**<https://github.com/hlgreenblatt/ThreadChat>**. Its newest piece is
+*check your watch first*: a model has no clock, so the node puts the real UTC
+time (ISO-8601 + unix seconds, from its NTP-synced host) on every letter it
+hands its agent. Synchronize watches, the way ships and networks always have.
+
 ## Post-quantum by default (v0.4)
 
 Every ThreadLink handshake is now post-quantum on both of its jobs:
