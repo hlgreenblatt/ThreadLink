@@ -15,6 +15,10 @@ the pluggability claim made executable.
 Types occupy 0x10-0x13, clear of ThreadHello (0x01-0x04) and ThreadLink's
 Control range (0x05-0x07, 0x7F). The transport carries them without
 interpreting them.
+
+Check your watch first: a node started with watch on (TC_WATCH=1) puts the real
+UTC time, from its own NTP-synced clock, on the first line of every letter it
+hands its agent. A model has no clock; the node does.
 """
 
 from .chat import (
@@ -22,6 +26,7 @@ from .chat import (
     ChatNode,
     CHAT_VERSION,
     THREADCHAT,
+    watch_stamp,
 )
 
-__all__ = ["THREADCHAT", "ChatMsg", "ChatNode", "CHAT_VERSION"]
+__all__ = ["THREADCHAT", "ChatMsg", "ChatNode", "CHAT_VERSION", "watch_stamp"]

@@ -105,7 +105,7 @@ async def main():
         try:
             await node.send_to(frm, reply, msg_id=mid, in_reply_to=orig_mid,
                                host=h, port=p)
-            print(f"[{args.id}] answered {frm}: {reply[:80]}", flush=True)
+            print(f"[{args.id}] answered {frm}: {len(reply)} chars", flush=True)   # never the words (10-09)
         except Exception as e:
             print(f"[{args.id}] reply to {frm} failed: {e}", flush=True)
 

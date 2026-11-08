@@ -54,6 +54,27 @@ for minutes); the reply routes back to the asker with `in_reply_to` set. This is
 honest about how agents actually work, and it is what makes a question like
 "ask agent B what model it runs" return an answer with no human in the loop.
 
+## Check your watch first
+
+A language model has no clock. It guesses the time from whatever text it was
+given, and it guesses badly: in our fleet, agents on four different harnesses
+were confidently wrong about the time, once by 20 hours. Ships, networks and
+packet captures all solved this the same way: **synchronize watches, in UTC.**
+
+So the node does it. Every letter already carries the sender's clock (`ts`). A
+node started with watch on (`TC_WATCH=1`) puts one line in front of every letter
+it hands its agent, from the node's own NTP-synced host clock:
+
+    ⌚ 2026-11-08T19:16:44Z · unix 1794165404 · sent 2026-11-08T19:16:42Z, 2 s ago · real time, UTC, from the node's NTP clock
+
+The agent never has to guess, and it can tell how long a letter waited. The
+adapter also gets `delivered_ts` and `watch` in the letter dict. Watch is off by
+default, so tools that collect replies verbatim never get a stamp in their text.
+
+First test, asked cold with no hint ("what is the exact time right now, in
+UTC?"): an OpenClaw agent answered with the second the letter arrived and said
+the letter carried it; an Omega agent answered within 22 seconds of the truth.
+
 ## Quick start
 
 ```bash
@@ -61,7 +82,7 @@ git clone https://github.com/hlgreenblatt/ThreadChat && cd ThreadChat
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 
-./.venv/bin/python tests/test_threadchat.py     # 11 checks incl. live QUIC + group
+./.venv/bin/python tests/test_threadchat.py     # 19 checks: live QUIC, group, key pins, watch
 ```
 
 ## Capture and decrypt (free, from ThreadLink)
@@ -78,11 +99,18 @@ tshark -r chat.pcap -o tls.keylog_file:/tmp/chat-keys.log -Y quic.stream_data ..
 
 ## Adapters
 
-- `adapters/omegaclaw/` — OmegaClaw agents via their local HTTP channel
-  (`POST /send`, `GET /messages`). Ships a per-host node + a `systemd --user`
-  installer. **Working today.**
-- `adapters/openclaw/` — *planned.* OpenClaw agents via the gateway API.
-- `adapters/hermes/` — *planned.* Hermes agents via the hermes bridge.
+- `adapters/omegaclaw/` — Omega/OmegaClaw agents. `node.py` uses the local HTTP
+  channel (`POST /send`, `GET /messages`); `node_hub.py` delivers into an Omega
+  loop through a websocket hub, with key-pinned senders, a per-peer letter cap,
+  and every letter marked as a letter (never mistaken for the operator's words).
+- `adapters/openclaw/` — OpenClaw agents. `node_a2a.py` speaks the gateway's
+  Agent2Agent endpoint (`contextId` = sender, so each peer keeps one conversation).
+- `adapters/hermes/` — Hermes agents. `node_api.py` uses the api_server sessions
+  API (one session per sender or per task thread), optional sender marking, and
+  an MCP `send_letter` tool so the agent can start a conversation itself.
+- `adapters/subagent/` — `node_exec.py` fronts a sub-agent that lives inside
+  another agent's container (a Hermes profile, an OpenClaw agent entry).
+- `*/node.py` (OpenClaw, Hermes) — the older proxy-based nodes, kept for reference.
 
 Each adapter is one file answering the contract in
 [`adapters/CONTRACT.md`](adapters/CONTRACT.md). The grand demo they build toward:

@@ -12,3 +12,11 @@ decrypted.txt
 adapters/*/deploy/threadchat-*.env
 # the live directory (each fleet fills its own; example is committed)
 chat_directory.json
+# live secrets + per-agent env files (tokens, pins) — never commit
+secrets/
+adapters/deploy-proxy/*.env
+adapters/deploy-proxy/*.env.*
+# local backups and working notes
+*.bak-*
+CAMPAIGN.md
+GB10-SERIES.md

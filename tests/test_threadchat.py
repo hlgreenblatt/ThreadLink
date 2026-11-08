@@ -8,12 +8,13 @@ holds, and a reply routes to the original asker. Mirrors test_threadhello.py.
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from threadlink import ensure_cert
-from threadchat import ChatNode, ChatMsg, CHAT_VERSION
+from threadchat import ChatNode, ChatMsg, CHAT_VERSION, watch_stamp
 
 CERTS = Path(__file__).resolve().parent.parent / "certs"
 ok = fail = 0
@@ -42,15 +43,15 @@ async def main():
         return lambda letter: inbox[name].append(letter)
 
     A = ChatNode("A", sink("A"), directory={
-        "B": ("127.0.0.1", 4471), "C": ("127.0.0.1", 4472)})
+        "B": ("127.0.0.1", 5471), "C": ("127.0.0.1", 5472)})
     B = ChatNode("B", sink("B"), directory={
-        "A": ("127.0.0.1", 4470), "C": ("127.0.0.1", 4472)})
+        "A": ("127.0.0.1", 5470), "C": ("127.0.0.1", 5472)})
     C = ChatNode("C", sink("C"), directory={
-        "A": ("127.0.0.1", 4470), "B": ("127.0.0.1", 4471)})
+        "A": ("127.0.0.1", 5470), "B": ("127.0.0.1", 5471)})
 
-    await serve(A, 4470)
-    await serve(B, 4471)
-    await serve(C, 4472)
+    await serve(A, 5470)
+    await serve(B, 5471)
+    await serve(C, 5472)
     await asyncio.sleep(0.3)
 
     # 1. A -> B direct letter
@@ -86,6 +87,46 @@ async def main():
     bad = ChatNode("X", sink("A"))
     reply = await bad.handle(ChatMsg.CHAT_MSG, {"proto": 999, "msg_id": "x"}, None)
     check(reply and reply[1].get("error") == "proto_mismatch", "version mismatch refused")
+
+    # 6. sender pins: "from" is self-asserted, so a pinned node checks the key
+    from threadlink import spki_pin
+    pins = {"A": spki_pin(ensure_cert(CERTS, "A")[0])}
+    inbox["P"] = []
+    P = ChatNode("P", sink("P"), pins=pins, strict=True)
+    await serve(P, 5473)
+    await asyncio.sleep(0.2)
+    await A.send_to("P", "real A", msg_id="p1", host="127.0.0.1", port=5473)
+    await asyncio.sleep(0.1)
+    check([l["text"] for l in inbox["P"]] == ["real A"], "pinned sender with its own key accepted")
+    forger = ChatNode("A", sink("C"))              # says "A" but holds C's key
+    cc, ck = ensure_cert(CERTS, "C")
+    forger._certfile, forger._keyfile = str(cc), str(ck)
+    r = await forger.send_to("P", "forged", msg_id="p2", host="127.0.0.1", port=5473)
+    forged_err = str(r["ack"].get("error"))
+    await asyncio.sleep(0.1)
+    check(len(inbox["P"]) == 1, "forged sender (wrong key) not delivered")
+    check(forged_err == "sender_key_mismatch", "forged sender told sender_key_mismatch")
+    r = await B.send_to("P", "unpinned", msg_id="p3", host="127.0.0.1", port=5473)
+    strict_err = str(r["ack"].get("error"))
+    await asyncio.sleep(0.1)
+    check(len(inbox["P"]) == 1 and strict_err == "unknown_sender",
+          "strict node refuses a sender with no pin")
+
+    # watch: a node with watch on hands its agent the real UTC time first (Captain 2026-11-08)
+    inbox["W"] = []
+    W = ChatNode("W", sink("W"), watch=True)
+    await serve(W, 5474)
+    await asyncio.sleep(0.3)
+    await A.send_to("W", "what time is it?", msg_id="w1", host="127.0.0.1", port=5474)
+    await asyncio.sleep(0.1)
+    got = inbox["W"][0] if inbox["W"] else {}
+    first, _, rest = str(got.get("text", "")).partition("\n")
+    check(first.startswith("⌚ ") and "Z · unix " in first and " · sent " in first,
+          "watch node: first line is the UTC stamp with the sender's time")
+    check(rest == "what time is it?", "watch node: the letter itself follows intact")
+    check(abs(float(got.get("delivered_ts", 0)) - time.time()) < 5 and got.get("watch") == first,
+          "watch node: delivered_ts + watch fields carried for the adapter")
+    check(watch_stamp(None, 0).startswith("⌚ 1970-01-01T00:00:00Z · unix 0"), "the epoch reads as the epoch")
 
     print("\n" + "=" * 60)
     print(f"{ok} passed, {fail} failed")
