@@ -1,0 +1,16 @@
+.env
+*.env
+!.env.example
+agent_10.env
+*_key.txt
+*grok.txt
+tk_paid_approved.json
+tk_paid_request.json
+__pycache__/
+*.pyc
+.venv/
+# The FabricPC substrate is its own upstream repo — clone it here, don't vendor it.
+FabricPC/
+# Demo TLS material is generated on demand by threadlink.certs.ensure_cert —
+# never commit keys, even self-signed throwaways.
+certs/

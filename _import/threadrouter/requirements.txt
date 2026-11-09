@@ -1,0 +1,7 @@
+# ThreadLink — the QUIC comlink ThreadHello rides on (its own repo, on purpose)
+threadlink @ git+https://github.com/hlgreenblatt/ThreadLink
+# FabricPC's learning substrate (clone FabricPC itself next to this repo:
+#   git clone https://github.com/trueagi-io/FabricPC )
+jax
+optax
+tqdm
