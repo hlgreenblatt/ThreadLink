@@ -29,7 +29,7 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from threadlink import ensure_cert, spki_pin                # noqa: E402
 from threadhello import HelloAgent, RouteStore              # noqa: E402
@@ -37,7 +37,7 @@ from threadhello import HelloAgent, RouteStore              # noqa: E402
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 HOST = "127.0.0.1"
-CERTS = Path(__file__).resolve().parent.parent / "certs"
+CERTS = Path(__file__).resolve().parent.parent.parent / "certs"
 
 # A realistic heterogeneous fleet: C is a laptop with no local GPU, so it has
 # never heard of `local_code`. The merge filter has to cope with that.

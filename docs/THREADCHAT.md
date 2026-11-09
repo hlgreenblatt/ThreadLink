@@ -1,3 +1,12 @@
+> **Now part of the ThreadLink toolkit.** This page was the README of the
+> standalone ThreadChat repository, whose full history is merged into this one.
+> One install now brings ThreadChat with the core: `pip install
+> git+https://github.com/hlgreenblatt/ThreadLink`. In this tree the package is
+> `threadchat/`, the adapters are `adapters/`, the tests are
+> `tests/test_threadchat.py` and the demos moved from `demo/` to `demo/chat/`.
+> The watch now lives in the core as ThreadWatch (`threadlink/watch.py`);
+> `threadchat.watch_stamp` still works.
+
 # ThreadChat
 
 **Direct agent-to-agent messaging over [ThreadLink](https://github.com/hlgreenblatt/ThreadLink).**

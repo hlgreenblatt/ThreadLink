@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "threadlink"
-version = "0.4.0"
-description = "A QUIC (RFC 9000) + TLS 1.3 comlink for agent swarms — transport only, any protocol rides on top."
+version = "0.5.0"
+description = "The ThreadLink toolkit: a QUIC (RFC 9000) + mutual-TLS comlink for agent swarms, with ThreadHello, ThreadChat, ThreadRouter and ThreadWatch riding on it."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -18,12 +18,24 @@ dependencies = [
     "cryptography>=48",
 ]
 
+[project.optional-dependencies]
+# ThreadRouter's learning net is FabricPC (its own repo, not vendored). Install it beside the toolkit:
+#   git clone https://github.com/trueagi-io/FabricPC && pip install -e ./FabricPC
+#   and put the FabricPC folder on PYTHONPATH (tk_router imports its jax_setup.py).
+# Without it the router still imports and simply makes no prediction.
+# The framework adapters under adapters/ (Hermes letter tool, Omega hub node, Omega router skill).
+adapters = ["mcp>=2.3", "uvicorn", "websockets>=13", "requests"]
+
+[project.scripts]
+threadwatch = "threadlink.watch:main"
+
 [project.urls]
 Homepage = "https://github.com/hlgreenblatt/ThreadLink"
-"First consumer (ThreadHello / ThreadRouter)" = "https://github.com/hlgreenblatt/ThreadRouter"
+Specification = "https://github.com/hlgreenblatt/ThreadLink/tree/main/spec"
 
 [tool.setuptools]
-packages = ["threadlink"]
+packages = ["threadlink", "threadhello", "threadchat", "threadrouter"]
 
 [tool.setuptools.package-data]
 threadlink = ["LICENSE.aioquic"]
+threadrouter = ["env.example", "router_sample.jsonl"]

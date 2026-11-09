@@ -1,3 +1,11 @@
+> **Now part of the ThreadLink toolkit.** This page was the README of the
+> standalone ThreadRouter repository (ThreadHello + the router), whose full
+> history is merged into this one. In this tree ThreadHello is `threadhello/`,
+> the router is `threadrouter/tk_router.py` (`from threadrouter import
+> tk_router`), its tests are `tests/test_threadhello.py`, its demos moved to
+> `demo/hello/` and its Omega skill to `adapters/omegaclaw-router/`.
+> ThreadRouter's old copy of ThreadChat is retired; `threadchat/` is the one.
+
 # ThreadRouter
 
 **A learning cost/privacy router for autonomous agents — free & private by default,

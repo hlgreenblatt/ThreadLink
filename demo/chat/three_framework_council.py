@@ -7,13 +7,15 @@ the whole conversation; run with SSLKEYLOGFILE set and the encrypted QUIC
 decrypts to CHAT_MSG frames from all three frameworks in one pcap.
 
 Griff and Mnemosyne answer via the live griff-proxy (real agents, real replies).
+FLEET-ONLY: it needs the live fleet bus and its caller token, and it sends a
+question to two real agents. Outside that fleet it stops at the missing token.
 """
 import asyncio
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from threadlink import ensure_cert

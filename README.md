@@ -1,33 +1,51 @@
 # ThreadLink
 
-A QUIC comlink for agent swarms. Transport only.
+A toolkit for agent swarms, built on one QUIC comlink.
 
-**HyperSprint #1 · Track 1 (OmegaClaw Agents) · Team ThreadKeepers**
+**Born at HyperSprint #1 · Track 1 (OmegaClaw Agents) · Team ThreadKeepers**
 
 > We haven't invented another transport protocol. We're asking whether
 > decentralized agents should take better advantage of one we already have.
 
-ThreadLink moves framed messages between two agents over QUIC (RFC 9000) with
-TLS 1.3 — mandatory encryption, one round trip to first byte, many independent
-streams per connection, and a connection that survives the agent moving to a
-different network. It knows nothing about routing, models, or OmegaClaw
-internals: it is a skill any OmegaClaw agent (or any agent, full stop) can plug
-in and define its own protocol on top of.
+Nmap is a scanner, and it ships ncat, nping and ndiff beside it. Wireshark is a
+capture viewer, and it ships tshark and dumpcap. ThreadLink works the same way:
+one core that every tool rides on, and the tools, in one install.
 
-The first protocol that rides on it is **ThreadHello** — ThreadRouter agents
-introducing themselves and trading learned FabricPC route tables. That lives
-where it belongs, with the router:
-**<https://github.com/hlgreenblatt/ThreadRouter>** (v0.2). If the route-sharing
-idea goes nowhere, this comlink is still useful on its own — that separation is
-the point, and it is enforced by the repo boundary: ThreadRouter imports
-ThreadLink; ThreadLink imports nothing of ThreadRouter.
+| Tool | The question it answers | Where |
+|---|---|---|
+| **ThreadLink** | How do two agents talk at all? QUIC (RFC 9000), mutual TLS 1.3, post-quantum | `threadlink/` |
+| **ThreadHello** | What have our routers learned? Agents introduce themselves and trade route evidence | `threadhello/` |
+| **ThreadChat** | Agent-to-agent letters, on any harness, every sender pinned by its key | `threadchat/`, `adapters/` |
+| **ThreadRouter** | Where should this work go? A learning model router (FabricPC) | `threadrouter/` |
+| **ThreadWatch** | What time is it, really? | `threadlink/watch.py`, the `threadwatch` command |
 
-The second is **ThreadChat**, agent-to-agent letters, now running a live mesh
-of agents on four harnesses (Omega, OpenClaw, Hermes, Claude Code):
-**<https://github.com/hlgreenblatt/ThreadChat>**. Its newest piece is
-*check your watch first*: a model has no clock, so the node puts the real UTC
-time (ISO-8601 + unix seconds, from its NTP-synced host) on every letter it
-hands its agent. Synchronize watches, the way ships and networks always have.
+The core imports none of the tools, so anything that can carry bytes can use
+ThreadLink on its own. Chat does not need the router; the router does not need
+chat. They share the comlink, the certificates and the watch.
+
+ThreadChat runs a live mesh of agents on four harnesses today (Omega, OpenClaw,
+Hermes, Claude Code); see [docs/THREADCHAT.md](docs/THREADCHAT.md). ThreadHello
+and ThreadRouter are described in [docs/THREADROUTER.md](docs/THREADROUTER.md).
+The wire format is written up as an Internet-Draft in [spec/](spec/).
+
+## Check your watch first
+
+A model has no clock. It guesses the time from whatever text it was given, and
+it guesses wrong more often than anyone would like. A node's host has a clock
+kept honest by NTP, so the node is the one that tells the time.
+
+```
+$ threadwatch
+⌚ 2026-11-09T01:07:05Z · unix 1794186425 · real time, UTC, from the node's NTP clock
+clock: NTP synchronized
+```
+
+ThreadChat puts that line on every letter a node hands its agent
+(`TC_WATCH=1`), with the time the letter was sent and how long ago. ThreadHello
+evidence carries the time it was last updated, so a router can ask a peer for
+only what changed since. UTC, because that is how people who read packet
+captures work: one shared map of change, the same for every node, wherever it
+sits. Synchronize watches, the way ships and networks always have.
 
 ## Post-quantum by default (v0.4)
 
@@ -110,24 +128,38 @@ only a handful of `Control` codes (PING/PONG/BYE/ERROR).
 
 ```bash
 git clone https://github.com/hlgreenblatt/ThreadLink && cd ThreadLink
-uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python aioquic
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e .
 
-./.venv/bin/python tests/test_threadlink.py   # 24 checks, incl. live QUIC
-./.venv/bin/python demo/migration.py          # the agent moves, the link lives
-./.venv/bin/python bench/handshake.py         # QUIC vs TCP+TLS, measured honestly
+./.venv/bin/threadwatch                          # check your watch
+./.venv/bin/python tests/test_threadlink.py      # 42 checks: live QUIC, post-quantum, classical fallback
+./.venv/bin/python tests/test_threadchat.py      # 19 checks: letters, key pins, threads, the watch
+./.venv/bin/python tests/test_threadhello.py     # 39 checks incl. live route sync
+./.venv/bin/python demo/migration.py             # the agent moves, the link lives
+./.venv/bin/python demo/chat/two_agent_chat.py   # two agents trade a letter
+./.venv/bin/python demo/hello/three_agents.py    # route evidence travels two hops
+./.venv/bin/python bench/handshake.py            # QUIC vs TCP+TLS, measured honestly
 ```
 
-Or install it as a dependency of your own agent:
+The learning router needs FabricPC, which is its own project:
+
+```bash
+git clone https://github.com/trueagi-io/FabricPC
+uv pip install --python .venv/bin/python -e ./FabricPC
+FABRICPC_PATH=$PWD/FabricPC ./.venv/bin/python demo/hello/with_threadrouter.py
+```
+
+Or install the toolkit as a dependency of your own agent:
 
 ```bash
 pip install git+https://github.com/hlgreenblatt/ThreadLink
+pip install "threadlink[adapters] @ git+https://github.com/hlgreenblatt/ThreadLink"   # + framework adapters
 ```
 
 Watch the wire while a demo runs (needs `CAP_NET_RAW`):
 
 ```bash
-sudo tcpdump -i lo -n 'udp portrange 4433-4437'
-# or in Wireshark, filter:  quic
+sudo tcpdump -i lo -n 'udp portrange 4433-4499'
+# or in Wireshark, filter:  quic   (wireshark/threadlink.lua decodes the frames)
 ```
 
 ## The benchmark is honest on purpose
@@ -150,12 +182,22 @@ layer to grow into.
 ## Layout
 
 ```
-threadlink/link.py    dial/listen, streams, migration (aioquic underneath)
-threadlink/wire.py    10-byte frame header + JSON body; type byte is opaque
-threadlink/certs.py   per-agent self-signed certs (ML-DSA-65 default) + SPKI pins
-threadlink/pq.py      X25519MLKEM768 + ML-DSA for aioquic 1.3.0
-demo/migration.py     Connection ID rotates, session survives
-bench/handshake.py    QUIC vs TCP+TLS 1.3, measured vs projected
-tests/                42 checks: live QUIC round trip, post-quantum handshake,
-                      fallback to a classical peer
+threadlink/link.py       dial/listen, streams, migration (aioquic underneath)
+threadlink/wire.py       10-byte frame header + JSON body; type byte is opaque
+threadlink/certs.py      per-agent self-signed certs (ML-DSA-65 default) + SPKI pins
+threadlink/pq.py         X25519MLKEM768 + ML-DSA for aioquic 1.3.0
+threadlink/watch.py      ThreadWatch: the UTC stamp + the `threadwatch` command
+threadhello/             route-evidence exchange between routers (observations, not weights)
+threadchat/              agent-to-agent letters: sender pins, threads, the watch
+threadrouter/            tk_router: fingerprint -> FabricPC outcome bundle -> chooser
+adapters/                ThreadChat nodes for Omega, OpenClaw, Hermes, sub-agents; Omega router skill
+demo/                    migration, chat/, hello/, wireshark/ (decrypted captures)
+bench/handshake.py       QUIC vs TCP+TLS 1.3, measured vs projected
+spec/                    draft-greenblatt-threadlink-00 (the wire format)
+wireshark/threadlink.lua Wireshark dissector
+tests/                   100 checks across the core, ThreadChat and ThreadHello
+docs/                    SECURITY.md, THREADCHAT.md, THREADROUTER.md
 ```
+
+ThreadChat and ThreadRouter began as their own repositories; their full
+histories were merged in, so `git log` still shows every step.

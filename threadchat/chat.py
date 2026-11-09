@@ -17,11 +17,11 @@ import inspect
 import logging
 import os
 import time
-from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Awaitable, Callable, Optional
 
 from threadlink import Control, Peer, dial, listen
+from threadlink.watch import watch_stamp  # ThreadWatch, shared by the whole toolkit
 
 log = logging.getLogger("threadchat")
 
@@ -36,24 +36,6 @@ THREADCHAT = "threadchat/1"
 # always sent) the UTC time it was sent. Opt-in per node (TC_WATCH=1 in the agent's node env), so
 # collectors that save replies verbatim (threadchat-send, the desk) never get a stamp in a saved piece.
 WATCH = os.environ.get("TC_WATCH", "0") == "1"
-
-
-def _utc(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def watch_stamp(sent_ts: Any = None, now: Optional[float] = None) -> str:
-    """One line: the real time now (UTC + unix) and when the letter was sent."""
-    now = time.time() if now is None else float(now)
-    line = f"⌚ {_utc(now)} · unix {int(now)}"
-    try:
-        sent = float(sent_ts)
-    except (TypeError, ValueError):
-        sent = None
-    if sent is not None and abs(now - sent) < 7 * 86400:      # a sane sender clock only
-        age = now - sent
-        line += f" · sent {_utc(sent)}" + (f", {age:.0f} s ago" if age >= 2 else "")
-    return line + " · real time, UTC, from the node's NTP clock"
 
 
 class ChatMsg(IntEnum):

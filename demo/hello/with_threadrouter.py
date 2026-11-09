@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
 # FabricPC ships `jax_setup.py` at its repo root, and tk_router imports it as a
 # top-level module — so the FabricPC directory has to be on the path too, not
@@ -42,14 +42,14 @@ from threadhello import HelloAgent, RouteStore              # noqa: E402
 
 BAR = "─" * 74
 HOST, PORT = "127.0.0.1", 4437
-CERTS = Path(__file__).resolve().parent.parent / "certs"
+CERTS = Path(__file__).resolve().parent.parent.parent / "certs"
 
 REQUEST = "write me a python function that parses a json config file"
 
 
 async def main() -> None:
     try:
-        import tk_router
+        from threadrouter import tk_router
     except ImportError as exc:
         print(f"tk_router not importable from {REPO}: {exc}")
         print("if FabricPC is missing:  git clone https://github.com/trueagi-io/FabricPC")
@@ -86,7 +86,10 @@ async def main() -> None:
     server = await A.serve(HOST, PORT, certfile=cert, keyfile=key)
 
     # ---- Agent B has its own router and has never seen this ------------
-    B = HelloAgent("tr_agent_B", RouteStore("tr_agent_B"), paths)
+    # B carries its own identity cert: ThreadLink dials are mutually authenticated.
+    cert_b, key_b = ensure_cert(CERTS, "tr_agent_B", [HOST])
+    B = HelloAgent("tr_agent_B", RouteStore("tr_agent_B"), paths, spki_pin(cert_b),
+                   certfile=cert_b, keyfile=key_b)
     router_b = tk_router.Router()
 
     before = _predict(router_b, REQUEST)

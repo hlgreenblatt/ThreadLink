@@ -7,3 +7,26 @@ dist/
 # Demo TLS material is generated on demand by threadlink.certs.ensure_cert —
 # never commit keys, even self-signed throwaways.
 certs/
+# --- toolkit-wide (merged from ThreadChat + ThreadRouter) ---
+# capture artifacts: a TLS keylog decrypts a capture, never commit one
+*keys.log
+*.pcap
+decrypted.txt
+# live fleet files: directories, secrets, per-agent env files, tokens
+chat_directory.json
+secrets/
+.env
+*.env
+*.env.*
+!*.env.example
+adapters/*/deploy/threadchat-*.env
+*_key.txt
+*grok.txt
+tk_paid_approved.json
+tk_paid_request.json
+# FabricPC is its own upstream repo: clone it here, don't vendor it
+FabricPC/
+# local backups and working notes
+*.bak-*
+CAMPAIGN.md
+GB10-SERIES.md

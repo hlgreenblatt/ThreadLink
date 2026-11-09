@@ -44,7 +44,10 @@ except Exception:  # pragma: no cover
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
-    import tk_router as _tk
+    try:
+        from threadrouter import tk_router as _tk   # the ThreadLink toolkit
+    except ImportError:
+        import tk_router as _tk                    # a standalone copy on the path
 except Exception:  # pragma: no cover — router is the whole point; degrade loudly
     _tk = None
 
