@@ -1,4 +1,0 @@
-# ThreadChat depends on ThreadLink ONLY — the QUIC comlink. No routing, no
-# learning, no framework. That single dependency is the whole design: any agent
-# that can carry bytes over ThreadLink can join the conversation.
-threadlink @ git+https://github.com/hlgreenblatt/ThreadLink
