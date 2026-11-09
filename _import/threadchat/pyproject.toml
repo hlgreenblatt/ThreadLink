@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "threadchat"
+version = "0.1.0"
+description = "Direct agent-to-agent messaging over ThreadLink — a small protocol any agent framework can plug into via a thin adapter."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Larry Greenblatt" }]
+# ThreadLink ONLY. Not ThreadRouter — chatting must not require the router.
+dependencies = [
+    "threadlink @ git+https://github.com/hlgreenblatt/ThreadLink",
+]
+
+[project.urls]
+Homepage = "https://github.com/hlgreenblatt/ThreadChat"
+Transport = "https://github.com/hlgreenblatt/ThreadLink"
+
+[tool.setuptools]
+packages = ["threadchat"]

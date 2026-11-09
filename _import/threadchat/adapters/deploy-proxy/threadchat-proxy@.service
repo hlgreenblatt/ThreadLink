@@ -1,0 +1,22 @@
+[Unit]
+Description=ThreadChat proxy node for %i (OpenClaw/Hermes agent via griff-proxy)
+Documentation=https://github.com/hlgreenblatt/ThreadChat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/build/ThreadChat
+EnvironmentFile=%h/build/ThreadChat/adapters/deploy-proxy/threadchat-proxy-%i.env
+ExecStart=%h/build/ThreadChat/.venv/bin/python -u ${TC_ADAPTER} \
+    --id ${TC_ID} \
+    --proxy ${TC_PROXY} \
+    --token ${TC_TOKEN} \
+    --peer-name ${TC_PEER} \
+    --directory %h/build/ThreadChat/chat_directory.json \
+    --port ${TC_PORT}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
